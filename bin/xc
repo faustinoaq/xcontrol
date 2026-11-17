@@ -1,0 +1,248 @@
+#!/usr/bin/env python3
+"""Small tmux launcher for project-local Codex, Copilot and Claude teams."""
+import argparse
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shlex
+import shutil
+import sqlite3
+import subprocess
+import sys
+import tomllib
+import uuid
+
+SCRIPT = Path(__file__).resolve()
+STATE = Path(os.environ.get('XDG_STATE_HOME', str(Path.home() / '.local/state'))) / 'xcontrol'
+
+
+def run(*args, check=True):
+    return subprocess.run(list(args), text=True, capture_output=True, check=check)
+
+
+def tmux(*args, check=True):
+    return run('tmux', *args, check=check).stdout.strip()
+
+
+def load(filename):
+    path = Path(filename).expanduser().resolve(strict=True)
+    with path.open('rb') as stream:
+        config = tomllib.load(stream)
+    if set(config) - {'name', 'agents'}:
+        raise ValueError('Config supports only name and [[agents]].')
+    name = config.get('name', path.stem)
+    if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_-]*', name):
+        raise ValueError('name must contain letters, numbers, underscores or hyphens.')
+    agents = config.get('agents', [])
+    if not isinstance(agents, list) or not 1 <= len(agents) <= 16:
+        raise ValueError('Define between 1 and 16 [[agents]].')
+    seen = set()
+    workspaces = set()
+    for agent in agents:
+        if not isinstance(agent, dict) or set(agent) - {'id', 'folder', 'agent', 'role', 'resume'}:
+            raise ValueError('Agent fields: id, folder, agent, role, resume.')
+        ident = agent.get('id', '')
+        if not isinstance(ident, str) or not re.fullmatch(r'[A-Za-z0-9_-]+', ident) or ident in seen:
+            raise ValueError('Each agent needs a unique id of letters, numbers, _ or -.')
+        seen.add(ident)
+        engine = agent.get('agent', 'codex')
+        if engine not in ('codex', 'claude', 'copilot'):
+            raise ValueError('agent must be codex, claude, or copilot.')
+        folder = agent.get('folder')
+        if not isinstance(folder, str) or not folder:
+            raise ValueError('Each agent needs a folder.')
+        cwd = Path(folder).expanduser()
+        cwd = (path.parent / cwd).resolve()
+        if not cwd.is_dir():
+            raise ValueError(f'Folder does not exist: {cwd}')
+        key = (engine, str(cwd))
+        if key in workspaces:
+            raise ValueError('Use separate folders/worktrees for agents using the same CLI.')
+        workspaces.add(key)
+        resume = agent.get('resume', 'auto')
+        if not isinstance(resume, str) or (resume not in ('auto', 'new') and not re.fullmatch(r'[0-9a-fA-F-]{36}', resume)):
+            raise ValueError('resume must be auto, new, or a session UUID.')
+        if not isinstance(agent.get('role', ''), str):
+            raise ValueError('role must be text.')
+        agent.update(agent=engine, folder=str(cwd), resume=resume)
+    digest = hashlib.sha256(str(path).encode()).hexdigest()[:10]
+    return path, f'xc-{name}-{digest}', agents
+
+
+def latest_codex(cwd):
+    home = Path(os.environ.get('CODEX_HOME', str(Path.home() / '.codex')))
+    dbs = [p for p in home.glob('state_*.sqlite') if p.stem[6:].isdigit()]
+    if not dbs:
+        return None
+    db = max(dbs, key=lambda p: int(p.stem[6:]))
+    try:
+        with sqlite3.connect(db.resolve().as_uri() + '?mode=ro', uri=True, timeout=2) as conn:
+            row = conn.execute("SELECT id FROM threads WHERE cwd=? AND source='cli' AND archived=0 ORDER BY updated_at DESC LIMIT 1", (cwd,)).fetchone()
+            return row[0] if row else None
+    except sqlite3.Error:
+        print('Warning: cannot read Codex session metadata; starting a new conversation.', file=sys.stderr)
+        return None
+
+
+def command(agent):
+    engine, resume = agent['agent'], agent['resume']
+    if engine == 'codex':
+        sid = latest_codex(agent['folder']) if resume == 'auto' else (None if resume == 'new' else resume)
+        return ['codex', *(['resume'] if sid else []), '--no-daemon', '-C', agent['folder'], *([sid] if sid else [])]
+    if engine == 'copilot' and resume == 'auto':
+        # Copilot accepts a UUID for either a new or an existing session.
+        # A workspace-specific ID avoids resuming an unrelated global session.
+        sid = str(uuid.uuid5(uuid.NAMESPACE_URL, 'xcontrol:copilot:' + agent['folder']))
+        return ['copilot', '--session-id', sid]
+    return [engine, *(['--continue'] if resume == 'auto' else []), *(['--resume', resume] if resume not in ('auto', 'new') else [])]
+
+
+def lock(name, blocking=False):
+    STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(STATE, 0o700)
+    stream = (STATE / name).open('a')
+    try:
+        fcntl.flock(stream, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+    except BlockingIOError:
+        stream.close()
+        raise ValueError('This agent folder is already in use by another xcontrol group.')
+    return stream
+
+
+def managed(path, session):
+    if run('tmux', 'has-session', '-t', '=' + session, check=False).returncode:
+        return False
+    if tmux('show-options', '-qv', '-t', session, '@xcontrol_config') != str(path):
+        raise ValueError('Existing tmux session is not owned by this configuration.')
+    return True
+
+
+def peers(session):
+    raw = tmux('list-panes', '-t', session + ':agents', '-F', '#{@xcontrol_id}\t#{pane_id}\t#{pane_current_command}\t#{pane_dead}')
+    return [line.split('\t') for line in raw.splitlines()]
+
+
+def send(session, ident, message):
+    matches = [p for p in peers(session) if p[0] == ident]
+    if len(matches) != 1:
+        raise ValueError(f'No unique live pane for agent {ident}.')
+    if matches[0][3] == '1' or matches[0][2] in ('bash', 'sh', 'zsh', 'fish'):
+        raise ValueError('Agent is not running; refusing to paste a message into a shell.')
+    if not message.strip() or len(message.encode()) > 65536:
+        raise ValueError('Message must be nonempty and at most 64 KiB.')
+    # Bracketed paste prevents embedded newlines from becoming separate submissions.
+    pane = matches[0][1]
+    buffer = 'xc-' + os.urandom(8).hex()
+    subprocess.run(['tmux', 'load-buffer', '-b', buffer, '-'], input=message, text=True, check=True)
+    try:
+        tmux('paste-buffer', '-p', '-b', buffer, '-t', pane)
+        tmux('send-keys', '-t', pane, 'Enter')
+    finally:
+        tmux('delete-buffer', '-b', buffer, check=False)
+
+
+def pane(filename, ident):
+    path, session, agents = load(filename)
+    agent = next(a for a in agents if a['id'] == ident)
+    key = hashlib.sha256((agent['agent'] + ':' + agent['folder']).encode()).hexdigest()
+    with lock(key + '.lock', blocking=True):
+        os.chdir(agent['folder'])
+        os.environ['XCONTROL_CONFIG'] = str(path)
+        os.environ['XCONTROL_AGENT'] = ident
+        os.environ['XCONTROL_SESSION'] = session
+        print(f"xcontrol · {ident}: {agent.get('role', '')}", flush=True)
+        print(f"Peers: xc status {shlex.quote(str(path))}", flush=True)
+        # close_fds keeps the launcher lock out of the agent's descendants.
+        return subprocess.call(command(agent))
+
+
+def main():
+    if len(sys.argv) == 4 and sys.argv[1] == '--pane':
+        return pane(sys.argv[2], sys.argv[3])
+    parser = argparse.ArgumentParser(description=__doc__, epilog='Examples: xc sello.agents | xc status sello.agents | xc send sello.agents ios "Review the shared API"')
+    parser.add_argument('action_or_file', help='project.agents, check, status, send, or stop')
+    parser.add_argument('rest', nargs='*')
+    parser.add_argument('--detach', action='store_true', help='start without attaching')
+    parser.add_argument('-k', '--kill', action='store_true', help='close this project group')
+    args = parser.parse_args()
+    action = args.action_or_file
+    if action in ('check', 'status', 'send', 'stop'):
+        if not args.rest:
+            parser.error('A .agents file is required.')
+        filename, *extra = args.rest
+    else:
+        filename, extra, action = action, args.rest, ('stop' if args.kill else 'open')
+    if action == 'send':
+        if len(extra) != 2:
+            parser.error('Use xc send project.agents agent-id "message".')
+    elif extra:
+        parser.error('Unexpected arguments.')
+    path, session, agents = load(filename)
+    if action == 'check':
+        print(f'Valid: {path} ({len(agents)} agents; session {session})')
+        return 0
+    if not shutil.which('tmux'):
+        raise ValueError('Missing dependency: tmux.')
+    if action in ('status', 'send', 'stop'):
+        if not managed(path, session):
+            raise ValueError('Project group is not running.')
+        if action == 'status':
+            for ident, target, process, dead in peers(session):
+                print(f'{ident}\t{target}\t{process}\t' + ('exited' if dead == '1' else 'running'))
+        elif action == 'send':
+            send(session, *extra)
+        else:
+            tmux('kill-session', '-t', '=' + session)
+            print('Closed project group; saved CLI conversations remain.')
+        return 0
+    for agent in agents:
+        if not shutil.which(agent['agent']):
+            raise ValueError('Missing dependency: ' + agent['agent'])
+    with lock('launcher.lock', blocking=True):
+        if not managed(path, session):
+            # Hold all workspace locks until each pane has been created. Panes take
+            # ownership afterwards; a simultaneous launch is serialized above.
+            guards = []
+            try:
+                for agent in agents:
+                    key = hashlib.sha256((agent['agent'] + ':' + agent['folder']).encode()).hexdigest()
+                    guards.append(lock(key + '.lock'))
+                for index, agent in enumerate(agents):
+                    cmd = shlex.join([sys.executable, str(SCRIPT), '--pane', str(path), agent['id']])
+                    if index == 0:
+                        target = tmux('new-session', '-d', '-s', session, '-n', 'agents', '-c', agent['folder'], '-x', '200', '-y', '50', '-P', '-F', '#{pane_id}', cmd)
+                        tmux('set-option', '-t', session, '@xcontrol_config', str(path))
+                        tmux('set-option', '-t', session, 'pane-border-status', 'top')
+                        tmux('set-option', '-t', session, 'pane-border-format', ' #{pane_title} ')
+                        tmux('set-window-option', '-t', session, 'remain-on-exit', 'on')
+                    else:
+                        target = tmux('split-window', '-t', target, '-c', agent['folder'], '-P', '-F', '#{pane_id}', cmd)
+                    tmux('set-option', '-p', '-t', target, '@xcontrol_id', agent['id'])
+                    tmux('select-pane', '-t', target, '-T', agent['id'] + ' · ' + agent['agent'])
+                    tmux('select-layout', '-t', session + ':agents', 'tiled')
+                tmux('select-pane', '-t', peers(session)[0][1])
+            except BaseException:
+                # Only remove a session whose ownership marker we set.
+                if managed(path, session):
+                    tmux('kill-session', '-t', '=' + session)
+                raise
+            finally:
+                for guard in guards:
+                    guard.close()
+    if args.detach:
+        print(session)
+        return 0
+    if os.environ.get('TMUX'):
+        return subprocess.call(['tmux', 'switch-client', '-t', '=' + session])
+    return subprocess.call(['tmux', 'attach-session', '-t', '=' + session])
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main())
+    except (ValueError, OSError, tomllib.TOMLDecodeError, subprocess.CalledProcessError) as exc:
+        print(f'xcontrol: {exc}' + (f'\n{exc.stderr.strip()}' if isinstance(exc, subprocess.CalledProcessError) and exc.stderr else ''), file=sys.stderr)
+        sys.exit(1)
