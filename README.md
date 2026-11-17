@@ -1,4 +1,4 @@
-<p><img src="assets/logo.svg" alt="xcontrol symbol: four panes converging around an open center" width="128"></p>
+<p><img src="assets/logo.svg" alt="xcontrol mascot: a mint terminal creature with four arms" width="128"></p>
 
 # xcontrol
 
