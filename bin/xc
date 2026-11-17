@@ -7,8 +7,8 @@ import json
 import os
 from pathlib import Path
 import re
-import selectors
 import shlex
+import signal
 import shutil
 import sqlite3
 import subprocess
@@ -102,69 +102,66 @@ def load(filename):
     return path, f'xc-{name}-{digest}', agents
 
 
-def codex_limits(result):
-    """Conservative decision for the default Codex quota bucket, never paid credits."""
-    buckets = result.get('rateLimitsByLimitId')
-    if buckets is not None and not isinstance(buckets, dict):
-        return 'unknown'
-    bucket = (buckets or {}).get('codex') or result.get('rateLimits')
-    if not isinstance(bucket, dict):
-        return 'unknown'
-    if bucket.get('limitId') not in (None, 'codex'):
-        return 'unknown'
-    if bucket.get('rateLimitReachedType'):
-        return 'unavailable'
-    windows = [bucket.get(k) for k in ('primary', 'secondary') if bucket.get(k) is not None]
-    percentages = [w.get('usedPercent') if isinstance(w, dict) else None for w in windows]
-    if not percentages or any(type(n) not in (int, float) or not 0 <= n <= 100 for n in percentages):
-        return 'unknown'
-    return 'unavailable' if any(n >= 100 for n in percentages) else 'available'
+def probe_command(engine):
+    prompt = 'Reply with exactly XCONTROL_OK. Do not use tools or inspect files.'
+    commands = {
+        'codex': ['codex', 'exec', '--ephemeral', '--skip-git-repo-check',
+                  '--sandbox', 'read-only', '--json', prompt],
+        'claude': ['claude', '-p', prompt, '--tools', '', '--strict-mcp-config',
+                   '--mcp-config', '{"mcpServers":{}}', '--no-session-persistence',
+                   '--output-format', 'json', '--settings', '{"disableAllHooks":true}'],
+        'copilot': ['copilot', '-p', prompt, '--silent', '--available-tools=',
+                    '--disable-builtin-mcps', '--no-custom-instructions'],
+    }
+    return commands.get(engine)
 
 
-def codex_availability(timeout=10):
-    """Use the documented app-server account read, without creating a thread/turn."""
-    with tempfile.TemporaryDirectory(prefix='xc-quota-') as cwd:
-        with subprocess.Popen(['codex', 'app-server'], cwd=cwd, stdin=subprocess.PIPE,
-                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as proc:
-            try:
-                def write(message):
-                    proc.stdin.write((json.dumps(message) + '\n').encode())
-                    proc.stdin.flush()
-                write({'id': 0, 'method': 'initialize', 'params': {
-                    'clientInfo': {'name': 'xcontrol', 'version': '1.0'}}})
-                deadline, buffer = time.monotonic() + timeout, b''
-                with selectors.DefaultSelector() as selector:
-                    selector.register(proc.stdout, selectors.EVENT_READ)
-                    while time.monotonic() < deadline:
-                        if not selector.select(max(0, deadline - time.monotonic())):
-                            break
-                        chunk = os.read(proc.stdout.fileno(), 65536)
-                        if not chunk:
-                            break
-                        buffer += chunk
-                        if len(buffer) > 1048576:
-                            break
-                        while b'\n' in buffer:
-                            line, buffer = buffer.split(b'\n', 1)
-                            message = json.loads(line)
-                            if 'error' in message and message.get('id') in (0, 1):
-                                return 'unknown'
-                            if message.get('id') == 0 and 'result' in message:
-                                write({'method': 'initialized'})
-                                write({'id': 1, 'method': 'account/rateLimits/read'})
-                            elif message.get('id') == 1 and isinstance(message.get('result'), dict):
-                                return codex_limits(message['result'])
-                return 'unknown'
-            except (OSError, ValueError, TypeError, AttributeError):
-                return 'unknown'
-            finally:
-                if proc.poll() is None:
-                    proc.terminate()
+def probe_success(engine, output):
+    """Require an actual successful model answer, never just exit status."""
+    try:
+        if engine == 'claude':
+            result = json.loads(output)
+            return (result.get('type') == 'result' and not result.get('is_error')
+                    and result.get('result', '').strip() == 'XCONTROL_OK')
+        if engine == 'codex':
+            events = [json.loads(line) for line in output.splitlines() if line.strip()]
+            return (any(e.get('type') == 'turn.completed' for e in events)
+                    and not any(e.get('type') in ('error', 'turn.failed') for e in events)
+                    and any(e.get('type') == 'item.completed'
+                            and e.get('item', {}).get('type') == 'agent_message'
+                            and e['item'].get('text', '').strip() == 'XCONTROL_OK'
+                            for e in events))
+        return output.strip() == 'XCONTROL_OK'
+    except (ValueError, TypeError, AttributeError):
+        return False
+
+
+def model_availability(engine, timeout=30):
+    command = probe_command(engine)
+    if command is None:
+        return 'unknown'
+    # Keep project instructions and probe conversations out of real workspaces.
+    with tempfile.TemporaryDirectory(prefix='xc-probe-') as cwd:
+        for attempt in range(2):
+            with tempfile.TemporaryFile() as output:
                 try:
-                    proc.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait()
+                    with subprocess.Popen(command, cwd=cwd, stdin=subprocess.DEVNULL,
+                                          stdout=output, stderr=subprocess.DEVNULL,
+                                          start_new_session=True) as proc:
+                        try:
+                            code = proc.wait(timeout=timeout)
+                        except subprocess.TimeoutExpired:
+                            os.killpg(proc.pid, signal.SIGKILL)
+                            proc.wait()
+                            code = -1
+                        output.seek(0)
+                        answer = output.read(1048577)
+                        if code == 0 and len(answer) <= 1048576 and probe_success(engine, answer.decode('utf-8', errors='replace')):
+                            return 'available'
+                except OSError:
+                    pass
+    # Failure means unusable for this launch, not permanent account exhaustion.
+    return 'unavailable'
 
 
 def availability(engine, checks, cwd):
@@ -177,8 +174,7 @@ def availability(engine, checks, cwd):
                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                   timeout=5).returncode
             return {0: 'available', 1: 'unavailable'}.get(code, 'unknown')
-        if engine == 'codex':
-            return codex_availability()
+        return model_availability(engine)
     except (OSError, subprocess.TimeoutExpired):
         pass
     return 'unknown'
@@ -200,7 +196,7 @@ def resolve_agents(agents, path):
                         chosen['resume'] = 'new'
                     break
             else:
-                raise ValueError(f"{agent['id']}: no candidate has confirmed available usage. Configure [availability] checks or select an agent explicitly.")
+                raise ValueError(f"{agent['id']}: no candidate has confirmed working model access. Configure [availability] checks or select an agent explicitly.")
         if not shutil.which(chosen['agent']):
             raise ValueError('Missing dependency: ' + chosen['agent'])
         resolved.append(chosen)

@@ -237,31 +237,46 @@ class ResumeTest(unittest.TestCase):
 
 
 class AvailabilityTest(unittest.TestCase):
-    def test_native_quota_decisions(self):
-        for window in ('primary', 'secondary'):
-            self.assertEqual(xc.codex_limits({'rateLimits': {window: {'usedPercent': 100}}}), 'unavailable')
-        self.assertEqual(xc.codex_limits({'rateLimits': {'primary': {'usedPercent': 50}, 'secondary': {'usedPercent': 99}}}), 'available')
-        for bucket in [{}, {'primary': {'usedPercent': True}}, {'primary': {'usedPercent': -1}}]:
-            self.assertEqual(xc.codex_limits({'rateLimits': bucket}), 'unknown')
-        self.assertEqual(xc.codex_limits({'rateLimits': {'primary': {'usedPercent': 0}, 'rateLimitReachedType': 'monthly'}}), 'unavailable')
-        self.assertEqual(xc.codex_limits({'rateLimits': {'primary': {'usedPercent': 0}}, 'rateLimitsByLimitId': {'codex': {'primary': {'usedPercent': 100}}}}), 'unavailable')
-        self.assertEqual(xc.codex_limits({'rateLimits': {'limitId': 'another-model', 'primary': {'usedPercent': 0}}}), 'unknown')
-        self.assertEqual(xc.codex_limits({'rateLimitsByLimitId': []}), 'unknown')
+    def test_structured_success_requires_model_answer(self):
+        self.assertTrue(xc.probe_success('copilot', 'XCONTROL_OK\n'))
+        self.assertFalse(xc.probe_success('copilot', 'Logged in successfully'))
+        self.assertTrue(xc.probe_success('claude', json.dumps({'type':'result', 'result':'XCONTROL_OK', 'is_error':False})))
+        self.assertFalse(xc.probe_success('claude', json.dumps({'type':'result', 'result':'XCONTROL_OK', 'is_error':True})))
+        answer = {'type':'item.completed', 'item':{'type':'agent_message','text':'XCONTROL_OK'}}
+        complete = {'type':'turn.completed'}
+        self.assertTrue(xc.probe_success('codex', '\n'.join(map(json.dumps, [answer, complete]))))
+        self.assertFalse(xc.probe_success('codex', json.dumps(answer)))
+        self.assertFalse(xc.probe_success('codex', '\n'.join(map(json.dumps, [answer, complete, {'type':'turn.failed'}]))))
+        for engine in ('codex', 'claude'):
+            self.assertFalse(xc.probe_success(engine, 'invalid JSON'))
 
-    def test_app_server_read_only_protocol_and_timeout(self):
+    def test_model_probe_retry_and_isolated_directory(self):
         from unittest.mock import patch
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            executable = root/'codex'
-            log = root/'rpc'
-            executable.write_text('#!/usr/bin/env python3\nimport json,sys,os\nfor line in sys.stdin:\n m=json.loads(line)\n with open(os.environ["RPC_LOG"],"a") as f:f.write(m["method"]+"\\n")\n if m["method"]=="initialize":print(json.dumps({"id":0,"result":{}}),flush=True)\n if m["method"]=="account/rateLimits/read":print(json.dumps({"id":1,"result":{"rateLimits":{"primary":{"usedPercent":25}}}}),flush=True)\n')
-            executable.chmod(0o755)
-            with patch.dict(os.environ, {'PATH': directory + ':' + os.environ['PATH'], 'RPC_LOG': str(log)}):
-                self.assertEqual(xc.codex_availability(timeout=2), 'available')
-                self.assertEqual(log.read_text().splitlines(), ['initialize', 'initialized', 'account/rateLimits/read'])
-                executable.write_text('#!/usr/bin/env python3\nimport time\ntime.sleep(30)\n')
+            cli = root/'copilot'
+            log = root/'calls'
+            cli.write_text("#!/usr/bin/env python3\nimport os,sys,json\nfrom pathlib import Path\np=Path(os.environ['PROBE_LOG'])\nn=len(p.read_text().splitlines()) if p.exists() else 0\nwith p.open('a') as f:f.write(json.dumps({'cwd':os.getcwd(),'args':sys.argv[1:]})+'\\n')\nif n == 0: print('unauthorized');sys.exit(1)\nprint('XCONTROL_OK')\n")
+            cli.chmod(0o755)
+            with patch.dict(os.environ, {'PATH':directory+':'+os.environ['PATH'], 'PROBE_LOG':str(log)}):
+                self.assertEqual(xc.model_availability('copilot', timeout=2), 'available')
+                calls = [json.loads(line) for line in log.read_text().splitlines()]
+                self.assertEqual(len(calls), 2)
+                self.assertTrue(all('xc-probe-' in c['cwd'] for c in calls))
+                self.assertIn('--available-tools=', calls[0]['args'])
+                cli.write_text('#!/usr/bin/env python3\nimport time\ntime.sleep(30)\n')
                 start = time.monotonic()
-                self.assertEqual(xc.codex_availability(timeout=.1), 'unknown')
+                self.assertEqual(xc.model_availability('copilot', timeout=.1), 'unavailable')
                 self.assertLess(time.monotonic()-start, 3)
+
+    def test_failure_is_not_success_even_with_marker(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as directory:
+            cli = Path(directory)/'copilot'
+            cli.write_text('#!/usr/bin/env python3\nprint("XCONTROL_OK")\nraise SystemExit(1)\n')
+            cli.chmod(0o755)
+            with patch.dict(os.environ, {'PATH':directory+':'+os.environ['PATH']}):
+                self.assertEqual(xc.model_availability('copilot'), 'unavailable')
+        self.assertEqual(xc.model_availability('unknown-custom-agent'), 'unknown')
 
 if __name__=='__main__': unittest.main()

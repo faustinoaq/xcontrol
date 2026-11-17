@@ -78,7 +78,7 @@ The CLI inherits your normal permissions, model, and authentication. No permissi
 
 ## Automatic agent selection
 
-Use `agent = "auto"` to select the first installed candidate with confirmed available usage when opening a new group:
+Use `agent = "auto"` to select the first installed candidate with working model access when opening a new group:
 
 ```toml
 name = "myapp"
@@ -91,19 +91,22 @@ candidates = ["codex", "copilot", "claude"]
 role = "Backend services and shared APIs."
 ```
 
-The default candidate order is Codex, Copilot, then Claude. Missing, exhausted, and unknown candidates are skipped. If none can confirm availability, xcontrol reports the result and opens no panes. Use `xc availability myapp.agents` to inspect candidates without starting an agent. `xc check` only validates configuration and runs no availability checks.
+The default candidate order is Codex, Copilot, then Claude. Missing and failed candidates are skipped. If none confirms access, xcontrol opens no panes. `xc availability myapp.agents` runs the same checks; **it makes small model calls**. `xc check` only validates configuration and makes no calls.
 
-Codex has a built-in checker using its documented [app-server account quota API](https://learn.chatgpt.com/docs/app-server#6-rate-limits-chatgpt). It reads the default Codex quota bucket without creating a conversation or making a model call. Unreadable limits, API-key accounts without subscription quota information, and failed requests produce `unknown`. This checks account quota, not whether every model or feature is accessible; usage can also change between the check and your next prompt.
+For Codex, Copilot, and Claude, xcontrol sends a tiny prompt asking for `XCONTROL_OK` through `codex exec`, `copilot -p`, or `claude -p`. It requires both a successful exit and the actual model answer. A failed probe is retried once, including authorization failures that can be temporary. Results are cached per provider for one launch, so multiple panes do not repeat the same checks. Each attempt has a 30-second timeout. Reattaching makes no calls.
 
-Other CLIs currently need a checker supplied by you. Their interactive usage screens and session token totals are not a common machine-readable account quota API, so an installed CLI alone does not count as available. Optional `[availability]` entries override the built-in check or add support for any candidate. For example, if you already have a trusted `my-usage-check` executable:
+Probes run in a temporary directory, outside your project folders, without resuming your work conversations. Claude and Copilot tools are disabled for the probe; Codex uses its read-only sandbox. Installed CLI configuration is trusted, including any user-configured integrations. These checks consume a little usage and may incur charges under your existing provider billing settings. They use the CLI's default model selection, without forcing a premium model or changing billing settings. A successful probe confirms access at that moment, not how much quota remains or access to every model. A failed check only skips that provider for this launch; it does not diagnose a permanent subscription problem.
+
+Other CLIs can use a trusted custom checker in `[availability]`, which also overrides a built-in probe:
 
 ```toml
 [availability]
-copilot = ["my-usage-check", "copilot"]
-claude = ["my-usage-check", "claude"]
+devin = ["my-access-check", "devin"]
 ```
 
-These are example checker names, not bundled commands. Place the table before your first `[[agents]]` entry. A checker exits **0** only when the signed-in account has usage available, **1** when unavailable, or **2** when unknown. Other errors and timeouts count as unknown. Commands run as literal arguments, from the configuration directory, with a five-second timeout and suppressed output. They should only read account availability, never submit model prompts or enable paid usage. Trust checkers as you would any program running under your account; xcontrol does not sandbox them. Checks run once per candidate per launch; the native Codex check has a ten-second timeout.
+`my-access-check` is an example external command, not bundled. Place this table before your first `[[agents]]`. It must exit **0** for available, **1** for unavailable, or **2** for unknown. Other errors and timeouts count as unknown. Custom checkers run once per provider as literal arguments, from the configuration directory, with a five-second timeout and suppressed output. They are not automatically retried. Trust them as you would any program running under your account; xcontrol does not sandbox custom checkers.
+
+Noninteractive commands for custom checkers include [Devin's `devin -p`](https://docs.devin.ai/cli/reference/commands), [Gemini's `gemini -p`](https://geminicli.com/docs/cli/headless/), and [OpenCode's `opencode run`](https://opencode.ai/docs/cli/). A checker should also validate a model answer and restrict tools appropriately; merely invoking a CLI or checking login status does not prove model access.
 
 The chosen CLI appears in the pane title and `xc status`. Auto agents accept `resume = "auto"` or `"new"`; custom candidates start fresh. CLI-specific arguments and explicit session UUIDs require selecting that CLI explicitly. Reattaching keeps the existing selection. There is no mid-task failover or conversation transfer between providers; stop and reopen the group to select again.
 
@@ -130,7 +133,7 @@ The same `xc status` and `xc send` commands work with custom agents that accept 
 
 ```sh
 xc check myapp.agents             # validate without launching CLIs
-xc availability myapp.agents      # check account usage without model calls
+xc availability myapp.agents      # test model access (uses a small prompt)
 xc myapp.agents                   # start or attach
 xc myapp.agents --detach          # start in the background
 xc status myapp.agents            # role IDs, current panes, running/exited
@@ -195,6 +198,6 @@ xcontrol fits a simple existing setup: tmux is already installed, your agent CLI
 python3 -m unittest discover -s tests -v
 ```
 
-Tests launch isolated tmux servers with fake agent executables and quota responses; they make no model calls and do not access production services.
+Tests launch isolated tmux servers with fake agent executables and model responses; they make no model calls and do not access production services.
 
 MIT licensed.
