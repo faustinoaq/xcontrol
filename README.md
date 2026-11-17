@@ -88,7 +88,7 @@ Optional `resume = "auto"` is the default: Codex resumes its latest unarchived i
 
 Optional `prompt = "..."` submits an initial instruction for Codex, Copilot, or Claude when paired with `resume = "new"`. For auto selection, all candidates must be one of those three. This is separate from the displayed role.
 
-The CLI inherits your normal permissions, model, and authentication. No permission bypass options are added. Roles are printed in each pane; they are **not automatically sent as prompts**. The `agent` field names an executable on your PATH, and optional `args` are passed as literal arguments. xcontrol does not evaluate shell syntax. Use configuration files you trust: launching an agent runs that executable with your normal account access.
+**Codex panes bypass approvals and sandboxing by default**, using `--dangerously-bypass-approvals-and-sandbox`, so they can control tmux and communicate with peers. This gives Codex unrestricted access under your user account. Set `bypass = false` on a Codex or auto agent to inherit normal Codex permissions instead; for auto agents this setting applies only when Codex is selected. Availability probes remain restricted. Copilot, Claude, and custom CLIs keep their normal permissions. All CLIs inherit your model and authentication settings. Roles are printed in each pane; they are **not automatically sent as prompts**. The `agent` field names an executable on your PATH, and optional `args` are passed as literal arguments. xcontrol does not evaluate shell syntax. Use configuration files you trust: launching an agent runs that executable with your normal account access.
 
 ## Automatic agent selection
 
@@ -189,7 +189,7 @@ The installer makes it discoverable by Codex. For another agent that supports `S
 
 `xc status` and `xc send` need access to the local tmux Unix socket. A CLI can be visible in a pane while its sandboxed shell commands are denied access to that socket. xcontrol reports this as **Cannot access the tmux socket**, rather than claiming the group has stopped.
 
-Run `xc status myapp.agents` from your normal terminal to distinguish a stopped group from an agent permission restriction. If it works there but fails inside the agent, inspect that CLI's local socket permissions. Codex supports explicit [Unix socket permissions](https://learn.chatgpt.com/docs/permissions#unix-sockets), subject to your version and managed policy. Allowing a tmux socket grants control over that tmux server, so choose that access explicitly. xcontrol does not change sandbox permissions automatically. Do not restart working agents merely because a sandbox cannot query tmux.
+Run `xc status myapp.agents` from your normal terminal to distinguish a stopped group from an agent permission restriction. If it works there but fails inside the agent, inspect that CLI's local socket permissions. Codex supports explicit [Unix socket permissions](https://learn.chatgpt.com/docs/permissions#unix-sockets), subject to your version and managed policy. Allowing a tmux socket grants control over that tmux server, so choose that access explicitly. New Codex panes use bypass mode by default. Existing panes keep their previous permissions until you change them in Codex or relaunch the pane. If you deliberately set `bypass = false`, local socket permission may still be required. Do not restart working agents merely because a sandbox cannot query tmux.
 
 ## Related tools
 

@@ -162,6 +162,23 @@ class LauncherTest(unittest.TestCase):
         self.assertIn('--resume',next(e for e in self.events() if e['id']=='ios')['args'])
         self.assertNotIn('resume',next(e for e in self.events() if e['id']=='android')['args'])
 
+    def test_codex_bypass_default_and_opt_out(self):
+        self.start()
+        self.assertIn('--dangerously-bypass-approvals-and-sandbox', next(e for e in self.events() if e['id']=='android')['args'])
+        self.cli('stop', self.config)
+        (self.root/'events').unlink()
+        self.config.write_text(self.config.read_text().replace('agent="codex"', 'agent="codex"\nbypass=false'))
+        self.start()
+        self.assertNotIn('--dangerously-bypass-approvals-and-sandbox', next(e for e in self.events() if e['id']=='android')['args'])
+
+    def test_invalid_bypass_options(self):
+        original = self.config.read_text()
+        for value in ['"true"', '1']:
+            self.config.write_text(original.replace('agent="codex"', 'agent="codex"\nbypass='+value))
+            self.cli('check', self.config, ok=False)
+        self.config.write_text(original.replace('agent="claude"', 'agent="claude"\nbypass=true'))
+        self.cli('check', self.config, ok=False)
+
     def test_directory_bootstrap_launch_reattach_and_stop(self):
         script = self.root/'bin'/'codex'
         original = script.read_text()
@@ -303,6 +320,8 @@ class AvailabilityTest(unittest.TestCase):
                 self.assertEqual(len(calls), 2)
                 self.assertTrue(all('xc-probe-' in c['cwd'] for c in calls))
                 self.assertIn('--available-tools=', calls[0]['args'])
+                self.assertNotIn('--dangerously-bypass-approvals-and-sandbox', xc.probe_command('codex'))
+                self.assertIn('read-only', xc.probe_command('codex'))
                 cli.write_text('#!/usr/bin/env python3\nimport time\ntime.sleep(30)\n')
                 start = time.monotonic()
                 self.assertEqual(xc.model_availability('copilot', timeout=.1), 'unavailable')
