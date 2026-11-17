@@ -1,10 +1,25 @@
 # xcontrol
 
-A small tmux launcher for a project's Codex, Copilot and Claude agents. One configuration, one terminal group. No service, framework, model API keys, or Python packages to install.
+A small wrapper around tmux that opens and resumes your Codex, Copilot and Claude sessions and lets agents communicate with each other. Define the folders and agents in one `.agents` file, then open the project:
 
 ```sh
 xc sello.agents
 ```
+
+## Why xcontrol?
+
+I started by manually running and orchestrating multiple agents across different projects. My custom tmux scripts worked well, and I thought they might be useful to other people too. xcontrol grew out of those scripts so I could share the same workflow with the community.
+
+There are already many tools for working with coding agents:
+
+- Graphical interfaces such as [T3 Code](https://github.com/pingdotgg/t3code) and [Conductor](https://www.conductor.build/), and terminals such as [cmux](https://cmux.com/) with agent notifications and programmable workspaces.
+- Terminal interfaces such as [Herdr TUI](https://herdr.dev/tui/docs/), [Agent of Empires](https://www.agent-of-empires.com/), and [dmux](https://github.com/standardagents/dmux) for managing agents, sessions, and workspaces.
+
+If you already have tmux installed, especially if you have been using it to run agents, xcontrol adds a small reusable wrapper to that setup. It opens your project folders in tiled panes, resumes CLI conversations, and gives agents a way to find and message each other by role. You keep using tmux and the agent CLIs you already know.
+
+There is no additional service, model API integration, or Python package to install. A `.agents` file describes your project, and `xc` handles the tmux commands.
+
+## Requirements
 
 Requires Linux or WSL2, Python 3.11+, tmux, and the configured CLIs already installed and authenticated. Tested with Codex 0.167.0, Copilot 1.0.103 and tmux 3.4. Uses Linux `flock` through Python's standard library.
 
