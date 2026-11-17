@@ -1,4 +1,4 @@
-<p><img src="assets/logo.svg" alt="xcontrol logo: connected terminal panes" width="380"></p>
+<p><img src="assets/logo.svg" alt="xcontrol symbol: four panes converging around an open center" width="128"></p>
 
 # xcontrol
 
@@ -138,24 +138,22 @@ The installer makes it discoverable by Codex. For another agent that supports `S
 
 There are many ways to run multiple coding agents. These projects include graphical interfaces, terminal workspaces, and agent managers. Their scope varies; the table identifies what each one provides.
 
-Approximate GitHub stars, checked on November 17, 2026. Sorted by star count among the projects listed here. Stars indicate repository popularity, not active usage or a feature ranking, and the counts will change.
+| Tool | What it provides |
+| --- | --- |
+| [T3 Code](https://github.com/pingdotgg/t3code) | A graphical interface for working with coding agents |
+| [Herdr](https://github.com/herdrdev/herdr) | An agent-aware terminal runtime and workspace manager |
+| [tmux](https://github.com/tmux/tmux) | Persistent terminal sessions and panes; xcontrol uses it underneath |
+| [Zellij](https://github.com/zellij-org/zellij) | A terminal workspace and multiplexer |
+| [WezTerm](https://github.com/wezterm/wezterm) | A terminal emulator with multiplexing |
+| [cmux](https://github.com/manaflow-ai/cmux) | A macOS terminal with workspaces and agent notifications |
+| [Vibe Kanban](https://github.com/BloopAI/vibe-kanban) | A board-based interface for organizing coding agent work |
+| [Claude Squad](https://github.com/smtg-ai/claude-squad) | A terminal manager for multiple coding agents |
+| [Agent of Empires](https://github.com/agent-of-empires/agent-of-empires) | A tmux-based agent manager with terminal and web interfaces |
+| [workmux](https://github.com/raine/workmux) | Git worktrees and tmux windows for parallel agent tasks |
+| [dmux](https://github.com/standardagents/dmux) | A multiplexer for coding agents and Git worktrees |
+| [Agent Deck](https://github.com/asheshgoplani/agent-deck) | A terminal session manager for coding agents |
 
-| Tool | What it provides | GitHub stars |
-| --- | --- | ---: |
-| [T3 Code](https://github.com/pingdotgg/t3code) | A graphical interface for working with coding agents | 63.9K |
-| [Herdr](https://github.com/herdrdev/herdr) | An agent-aware terminal runtime and workspace manager | 51.6K |
-| [tmux](https://github.com/tmux/tmux) | Persistent terminal sessions and panes; xcontrol uses it underneath | 50.5K |
-| [Zellij](https://github.com/zellij-org/zellij) | A terminal workspace and multiplexer | 36.1K |
-| [WezTerm](https://github.com/wezterm/wezterm) | A terminal emulator with multiplexing | 29.6K |
-| [cmux](https://github.com/manaflow-ai/cmux) | A macOS terminal with workspaces and agent notifications | 28.8K |
-| [Vibe Kanban](https://github.com/BloopAI/vibe-kanban) | A board-based interface for organizing coding agent work | 28.7K |
-| [Claude Squad](https://github.com/smtg-ai/claude-squad) | A terminal manager for multiple coding agents | 8.8K |
-| [Agent of Empires](https://github.com/agent-of-empires/agent-of-empires) | A tmux-based agent manager with terminal and web interfaces | 4.6K |
-| [workmux](https://github.com/raine/workmux) | Git worktrees and tmux windows for parallel agent tasks | 3.1K |
-| [dmux](https://github.com/standardagents/dmux) | A multiplexer for coding agents and Git worktrees | 1.8K |
-| [Agent Deck](https://github.com/asheshgoplani/agent-deck) | A terminal session manager for coding agents | 1.3K |
-
-Each project link points to the repository used for its star count. Additional UI options include [Conductor](https://www.conductor.build/) and [Rex](https://www.superlogical.com/rex/).
+Additional UI options include [Conductor](https://www.conductor.build/) and [Rex](https://www.superlogical.com/rex/).
 
 xcontrol fits a simple existing setup: tmux is already installed, your agent CLIs are authenticated, and you want to reopen a project's sessions and let agents communicate through a small wrapper.
 
