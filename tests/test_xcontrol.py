@@ -38,8 +38,8 @@ class LauncherTest(unittest.TestCase):
         subprocess.run(['tmux', 'kill-server'], env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.tmp.cleanup()
 
-    def cli(self, *args, ok=True):
-        result = subprocess.run([str(CLI), *map(str,args)], env=self.env, text=True, capture_output=True, timeout=10)
+    def cli(self, *args, ok=True, cwd=None):
+        result = subprocess.run([str(CLI), *map(str,args)], env=self.env, text=True, capture_output=True, timeout=10, cwd=cwd)
         if ok:
             self.assertEqual(result.returncode, 0, result.stderr)
         else:
@@ -152,6 +152,36 @@ class LauncherTest(unittest.TestCase):
         self.start()
         self.assertIn('--resume',next(e for e in self.events() if e['id']=='ios')['args'])
         self.assertNotIn('resume',next(e for e in self.events() if e['id']=='android')['args'])
+
+    def test_directory_bootstrap_launch_reattach_and_stop(self):
+        script = self.root/'bin'/'codex'
+        original = script.read_text()
+        script.write_text(original.replace('import os,sys,json\n',
+            'import os,sys,json\nif "exec" in sys.argv:\n print(json.dumps({"type":"item.completed","item":{"type":"agent_message","text":"XCONTROL_OK"}}))\n print(json.dumps({"type":"turn.completed"}))\n sys.exit(0)\n'))
+        self.cli('--detach', cwd=self.root)
+        self.wait(lambda: len(self.events()) == 1)
+        event = self.events()[0]
+        self.assertEqual(event['cwd'], str(self.root))
+        self.assertEqual(event['id'], 'setup')
+        self.assertIn('Ask me to confirm', event['args'][-1])
+        self.assertNotIn('resume', event['args'])
+        generated = Path(event['config'])
+        self.assertTrue(generated.is_relative_to(self.root/'state'))
+        self.assertEqual(list(self.root.glob('*.agents')), [self.config])
+        self.assertIn('setup', self.cli('status', self.root).stdout)
+        self.cli(self.root, '--detach')
+        self.assertEqual(len(self.events()), 1)
+        self.cli('stop', self.root)
+
+    def test_initial_prompt_requires_new_builtin_session(self):
+        original = self.config.read_text()
+        for fields in ['prompt="hello"', 'resume="new"\nprompt=""',
+                       'resume="new"\nprompt=123']:
+            self.config.write_text(original.replace('agent="claude"', 'agent="claude"\n'+fields))
+            self.cli('check', self.config, ok=False)
+        self.config.write_text(original.replace('agent="claude"', 'agent="claude"\nresume="new"\nprompt="Help configure my project"'))
+        self.start()
+        self.assertEqual(next(e for e in self.events() if e['id']=='ios')['args'], ['Help configure my project'])
 
     def auto_config(self, checks):
         table = ', '.join(json.dumps(key) + ' = ' + json.dumps(value) for key, value in checks.items())

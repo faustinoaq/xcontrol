@@ -2,7 +2,7 @@
 
 # xcontrol
 
-A small wrapper around tmux that opens and resumes your CLI agent sessions, including Codex, Copilot and Claude and lets agents communicate with each other. Define the folders and agents in one `.agents` file, then open the project:
+A small wrapper around tmux that opens and resumes your CLI agent sessions, including Codex, Copilot and Claude and lets agents communicate with each other. Start with `xc .` to get help setting up a project, or define the folders and agents in one `.agents` file and open it:
 
 ```sh
 xc myapp.agents
@@ -35,6 +35,18 @@ cd xcontrol
 ```
 
 Installs `xc` and `xcontrol` into `~/.local/bin` and the included skill into `~/.codex/skills/xcontrol`. Keep `~/.local/bin` on your PATH. No sudo required. The commands are symlinks to this checkout; keep the checkout in place.
+
+## Start without a config file
+
+```sh
+cd ~/code/myapp
+xc .
+# Or simply: xc
+```
+
+xcontrol checks installed Codex, Copilot, and Claude in that order, using the same small access probes as `agent = "auto"`. It opens one setup agent in tmux and submits a starter prompt to inspect the project, find installed CLIs, and suggest folders and roles for an `.agents` file. The prompt asks it to confirm the proposed team with you before writing the file. Custom CLIs can be added to the resulting file explicitly.
+
+The temporary setup configuration lives under `${XDG_STATE_HOME:-~/.local/state}/xcontrol/quickstart`, outside your project. No project config is written by the launcher. Run `xc .` again to reattach; use `xc status .` or `xc stop .` to inspect or close this setup group. Stopping and reopening starts a fresh setup conversation and checks access again. For normal project work, launch the `.agents` file you create together.
 
 ## Configuration
 
@@ -73,6 +85,8 @@ role = "Backend services and shared APIs; coordinate changes with android and io
 Folders resolve relative to the `.agents` file, not your terminal directory. Absolute paths and `~` also work. Each agent has a unique ID, its own working directory, CLI executable name, and optional role and argument list. Up to 16 agents fit in a tiled layout; terminal size limits how many are practical.
 
 Optional `resume = "auto"` is the default: Codex resumes its latest unarchived interactive CLI thread for that exact directory, using read-only local SQLite metadata. Claude uses its native `--continue` in that directory. Copilot uses a stable workspace-specific native `--session-id`, creating or resuming its xcontrol conversation without selecting an unrelated global session. `resume = "new"` starts fresh; a session UUID resumes an explicit native conversation. Histories are not converted between CLIs. If Codex's metadata is unavailable, it starts fresh with a warning.
+
+Optional `prompt = "..."` submits an initial instruction for Codex, Copilot, or Claude when paired with `resume = "new"`. For auto selection, all candidates must be one of those three. This is separate from the displayed role.
 
 The CLI inherits your normal permissions, model, and authentication. No permission bypass options are added. Roles are printed in each pane; they are **not automatically sent as prompts**. The `agent` field names an executable on your PATH, and optional `args` are passed as literal arguments. xcontrol does not evaluate shell syntax. Use configuration files you trust: launching an agent runs that executable with your normal account access.
 
@@ -132,6 +146,8 @@ The same `xc status` and `xc send` commands work with custom agents that accept 
 ## Commands
 
 ```sh
+xc                               # setup agent in the current directory
+xc ./myapp                       # setup agent in another directory
 xc check myapp.agents             # validate without launching CLIs
 xc availability myapp.agents      # test model access (uses a small prompt)
 xc myapp.agents                   # start or attach

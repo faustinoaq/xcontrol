@@ -57,8 +57,8 @@ def load(filename):
     seen = set()
     workspaces = set()
     for agent in agents:
-        if not isinstance(agent, dict) or set(agent) - {'id', 'folder', 'agent', 'role', 'resume', 'args', 'candidates'}:
-            raise ValueError('Agent fields: id, folder, agent, role, resume, args, candidates.')
+        if not isinstance(agent, dict) or set(agent) - {'id', 'folder', 'agent', 'role', 'resume', 'args', 'candidates', 'prompt'}:
+            raise ValueError('Agent fields: id, folder, agent, role, resume, args, candidates, prompt.')
         ident = agent.get('id', '')
         if not isinstance(ident, str) or not re.fullmatch(r'[A-Za-z0-9_-]+', ident) or ident in seen:
             raise ValueError('Each agent needs a unique id of letters, numbers, _ or -.')
@@ -94,6 +94,12 @@ def load(filename):
             raise ValueError('Custom agents use resume = new; configure their native resume flags in args.')
         if not isinstance(resume, str) or (resume not in ('auto', 'new') and not re.fullmatch(r'[0-9a-fA-F-]{36}', resume)):
             raise ValueError('resume must be auto, new, or a session UUID.')
+        if 'prompt' in agent:
+            prompt = agent['prompt']
+            if not isinstance(prompt, str) or not prompt.strip() or len(prompt.encode()) > 65536:
+                raise ValueError('prompt must be nonempty text of at most 64 KiB.')
+            if resume != 'new' or (engine not in BUILTINS and engine != 'auto') or (engine == 'auto' and any(c not in BUILTINS for c in candidates)):
+                raise ValueError('Initial prompts require resume = new and Codex, Copilot, or Claude candidates.')
         if not isinstance(agent.get('role', ''), str):
             raise ValueError('role must be text.')
         agent.update(agent=engine, folder=str(cwd), resume=resume, args=extra_args,
@@ -223,7 +229,9 @@ def latest_codex(cwd):
 
 def command(agent):
     engine, resume = agent['agent'], agent['resume']
-    extra = agent.get('args', [])
+    extra = list(agent.get('args', []))
+    if agent.get('prompt'):
+        extra += (['-i', agent['prompt']] if engine == 'copilot' else [agent['prompt']])
     if engine not in ('codex', 'claude', 'copilot'):
         return [engine, *extra]
     if engine == 'codex':
@@ -302,11 +310,69 @@ def pane(filename, ident, selected=None):
         return subprocess.call(command(agent))
 
 
+def directory_config(directory, action):
+    folder = Path(directory).expanduser().resolve(strict=True)
+    if not folder.is_dir():
+        raise ValueError('Expected a project directory.')
+    digest = hashlib.sha256(str(folder).encode()).hexdigest()
+    target = STATE / 'quickstart' / digest / 'project.agents'
+    if target.exists() or action != 'open':
+        return target
+    prompt = """Help me set up xcontrol for this project. First read project instructions and inspect
+this directory and its immediate child folders, read-only. Check which of codex,
+copilot, and claude are installed using command -v. Other CLI agents can also be
+configured explicitly, with their documented args; do not guess availability.
+Suggest a small team with useful roles and separate folders/worktrees when the
+same CLI would work in the same repository. Ask me to confirm the folders and
+agents before writing a project .agents file. Do not launch peers, change source
+files, build, deploy, or publish anything during this setup.
+
+The .agents format is TOML. Example:
+name = "myapp"
+[[agents]]
+id = "android"
+folder = "./myapp-android"
+agent = "codex"
+role = "Android app; coordinate APIs with server."
+[[agents]]
+id = "server"
+folder = "./myapp-server"
+agent = "copilot"
+role = "Server APIs; coordinate with android."
+
+Resolve relative folders from the configuration file location. Use only existing
+folders, or ask before creating worktrees. agent = "auto" optionally accepts
+candidates = ["codex", "copilot", "claude"] and tests access with small model
+calls. Run xc check on the proposed file once written. Explain how to launch it
+with xc <file>.agents. Agents can discover peers with xc status "$XCONTROL_CONFIG"
+and communicate with xc send "$XCONTROL_CONFIG" <agent-id> "message". Roles are
+printed, not automatically submitted as prompts. Never include secrets or
+permission bypass flags in the configuration.
+"""
+    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    config = ('name = "setup"\n[[agents]]\nid = "setup"\nfolder = ' + json.dumps(str(folder), ensure_ascii=False)
+              + '\nagent = "auto"\nresume = "new"\nrole = "Project setup and .agents configuration"\nprompt = '
+              + json.dumps(prompt) + '\n')
+    # Publish a complete file atomically without overwriting another launch.
+    with tempfile.NamedTemporaryFile(mode='w', dir=target.parent, delete=False) as stream:
+        temporary = Path(stream.name)
+        stream.write(config)
+    try:
+        try:
+            os.link(temporary, target)
+        except FileExistsError:
+            pass
+    finally:
+        temporary.unlink()
+    print(f'Setup workspace: {folder}', file=sys.stderr)
+    return target
+
+
 def main():
     if len(sys.argv) in (4, 5) and sys.argv[1] == '--pane':
         return pane(*sys.argv[2:])
     parser = argparse.ArgumentParser(description=__doc__, epilog='Examples: xc myapp.agents | xc status myapp.agents | xc send myapp.agents ios "Review the shared API"')
-    parser.add_argument('action_or_file', help='project.agents, check, availability, status, send, or stop')
+    parser.add_argument('action_or_file', nargs='?', default='.', help='directory (default: .), project.agents, check, availability, status, send, or stop')
     parser.add_argument('rest', nargs='*')
     parser.add_argument('--detach', action='store_true', help='start without attaching')
     parser.add_argument('-k', '--kill', action='store_true', help='close this project group')
@@ -323,6 +389,12 @@ def main():
             parser.error('Use xc send project.agents agent-id "message".')
     elif extra:
         parser.error('Unexpected arguments.')
+    if Path(filename).expanduser().is_dir():
+        if action not in ('open', 'status', 'send', 'stop'):
+            parser.error('Use an .agents file for check or availability.')
+        if not shutil.which('tmux'):
+            raise ValueError('Missing dependency: tmux.')
+        filename = directory_config(filename, action)
     path, session, agents = load(filename)
     if action == 'check':
         print(f'Valid: {path} ({len(agents)} agents; session {session})')
