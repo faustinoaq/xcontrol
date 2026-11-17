@@ -10,10 +10,7 @@ xc sello.agents
 
 I started by manually running and orchestrating multiple agents across different projects. My custom tmux scripts worked well, and I thought they might be useful to other people too. xcontrol grew out of those scripts so I could share the same workflow with the community.
 
-There are already many tools for working with coding agents:
-
-- Graphical interfaces such as [T3 Code](https://github.com/pingdotgg/t3code) and [Conductor](https://www.conductor.build/), and terminals such as [cmux](https://cmux.com/) with agent notifications and programmable workspaces.
-- Terminal interfaces such as [Herdr TUI](https://herdr.dev/tui/docs/), [Agent of Empires](https://www.agent-of-empires.com/), and [dmux](https://github.com/standardagents/dmux) for managing agents, sessions, and workspaces.
+There are already popular tools for this workflow, including [T3 Code](https://github.com/pingdotgg/t3code), [Herdr](https://herdr.dev/), and [Vibe Kanban](https://github.com/BloopAI/vibe-kanban). Terminal workspaces such as [Zellij](https://zellij.dev/) and [WezTerm](https://wezterm.org/) are also widely used. The [related tools](#related-tools) section lists these and other established options.
 
 If you already have tmux installed, especially if you have been using it to run agents, xcontrol adds a small reusable wrapper to that setup. It opens your project folders in tiled panes, resumes CLI conversations, and gives agents a way to find and message each other by role. You keep using tmux and the agent CLIs you already know.
 
@@ -97,6 +94,31 @@ The included [skill](skills/xcontrol/SKILL.md) supports prompts such as:
 > Use xcontrol to create an agents file for this project where we have sello-dev with codex and sello-ios with copilot.
 
 The installer makes it discoverable by Codex. For another agent that supports `SKILL.md`, copy `skills/xcontrol` to that tool's skill directory.
+
+## Related tools
+
+There are many ways to run multiple coding agents. These projects include graphical interfaces, terminal workspaces, and agent managers. Their scope varies; the table identifies what each one provides.
+
+Approximate GitHub stars, checked on November 17, 2026. Sorted by star count among the projects listed here. Stars indicate repository popularity, not active usage or a feature ranking, and the counts will change.
+
+| Tool | What it provides | GitHub stars |
+| --- | --- | ---: |
+| [T3 Code](https://github.com/pingdotgg/t3code) | A graphical interface for working with coding agents | 63.9K |
+| [Herdr](https://github.com/herdrdev/herdr) | An agent-aware terminal runtime and workspace manager | 51.6K |
+| [tmux](https://github.com/tmux/tmux) | Persistent terminal sessions and panes; xcontrol uses it underneath | 50.5K |
+| [Zellij](https://github.com/zellij-org/zellij) | A terminal workspace and multiplexer | 36.1K |
+| [WezTerm](https://github.com/wezterm/wezterm) | A terminal emulator with multiplexing | 29.6K |
+| [cmux](https://github.com/manaflow-ai/cmux) | A macOS terminal with workspaces and agent notifications | 28.8K |
+| [Vibe Kanban](https://github.com/BloopAI/vibe-kanban) | A board-based interface for organizing coding agent work | 28.7K |
+| [Claude Squad](https://github.com/smtg-ai/claude-squad) | A terminal manager for multiple coding agents | 8.8K |
+| [Agent of Empires](https://github.com/agent-of-empires/agent-of-empires) | A tmux-based agent manager with terminal and web interfaces | 4.6K |
+| [workmux](https://github.com/raine/workmux) | Git worktrees and tmux windows for parallel agent tasks | 3.1K |
+| [dmux](https://github.com/standardagents/dmux) | A multiplexer for coding agents and Git worktrees | 1.8K |
+| [Agent Deck](https://github.com/asheshgoplani/agent-deck) | A terminal session manager for coding agents | 1.3K |
+
+Each project link points to the repository used for its star count. Additional UI options include [Conductor](https://www.conductor.build/) and [Rex](https://www.superlogical.com/rex/).
+
+xcontrol fits a simple existing setup: tmux is already installed, your agent CLIs are authenticated, and you want to reopen a project's sessions and let agents communicate through a small wrapper.
 
 ## Development
 
