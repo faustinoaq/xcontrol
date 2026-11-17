@@ -76,6 +76,37 @@ Optional `resume = "auto"` is the default: Codex resumes its latest unarchived i
 
 The CLI inherits your normal permissions, model, and authentication. No permission bypass options are added. Roles are printed in each pane; they are **not automatically sent as prompts**. The `agent` field names an executable on your PATH, and optional `args` are passed as literal arguments. xcontrol does not evaluate shell syntax. Use configuration files you trust: launching an agent runs that executable with your normal account access.
 
+## Automatic agent selection
+
+Use `agent = "auto"` to select the first installed candidate with confirmed available usage when opening a new group:
+
+```toml
+name = "myapp"
+
+[[agents]]
+id = "server"
+folder = "./myapp-server"
+agent = "auto"
+candidates = ["codex", "copilot", "claude"]
+role = "Backend services and shared APIs."
+```
+
+The default candidate order is Codex, Copilot, then Claude. Missing, exhausted, and unknown candidates are skipped. If none can confirm availability, xcontrol reports the result and opens no panes. Use `xc availability myapp.agents` to inspect candidates without starting an agent. `xc check` only validates configuration and runs no availability checks.
+
+Codex has a built-in checker using its documented [app-server account quota API](https://learn.chatgpt.com/docs/app-server#6-rate-limits-chatgpt). It reads the default Codex quota bucket without creating a conversation or making a model call. Unreadable limits, API-key accounts without subscription quota information, and failed requests produce `unknown`. This checks account quota, not whether every model or feature is accessible; usage can also change between the check and your next prompt.
+
+Other CLIs currently need a checker supplied by you. Their interactive usage screens and session token totals are not a common machine-readable account quota API, so an installed CLI alone does not count as available. Optional `[availability]` entries override the built-in check or add support for any candidate. For example, if you already have a trusted `my-usage-check` executable:
+
+```toml
+[availability]
+copilot = ["my-usage-check", "copilot"]
+claude = ["my-usage-check", "claude"]
+```
+
+These are example checker names, not bundled commands. Place the table before your first `[[agents]]` entry. A checker exits **0** only when the signed-in account has usage available, **1** when unavailable, or **2** when unknown. Other errors and timeouts count as unknown. Commands run as literal arguments, from the configuration directory, with a five-second timeout and suppressed output. They should only read account availability, never submit model prompts or enable paid usage. Trust checkers as you would any program running under your account; xcontrol does not sandbox them. Checks run once per candidate per launch; the native Codex check has a ten-second timeout.
+
+The chosen CLI appears in the pane title and `xc status`. Auto agents accept `resume = "auto"` or `"new"`; custom candidates start fresh. CLI-specific arguments and explicit session UUIDs require selecting that CLI explicitly. Reattaching keeps the existing selection. There is no mid-task failover or conversation transfer between providers; stop and reopen the group to select again.
+
 ## Other CLI agents, including Devin
 
 Any interactive CLI agent on your PATH can run in a pane. Codex, Copilot, and Claude have built-in resume handling. Other agents use the executable and arguments you provide.
@@ -99,6 +130,7 @@ The same `xc status` and `xc send` commands work with custom agents that accept 
 
 ```sh
 xc check myapp.agents             # validate without launching CLIs
+xc availability myapp.agents      # check account usage without model calls
 xc myapp.agents                   # start or attach
 xc myapp.agents --detach          # start in the background
 xc status myapp.agents            # role IDs, current panes, running/exited
@@ -163,6 +195,6 @@ xcontrol fits a simple existing setup: tmux is already installed, your agent CLI
 python3 -m unittest discover -s tests -v
 ```
 
-Tests launch isolated tmux servers with fake agent executables; they make no model calls and do not access production services.
+Tests launch isolated tmux servers with fake agent executables and quota responses; they make no model calls and do not access production services.
 
 MIT licensed.

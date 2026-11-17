@@ -153,6 +153,73 @@ class LauncherTest(unittest.TestCase):
         self.assertIn('--resume',next(e for e in self.events() if e['id']=='ios')['args'])
         self.assertNotIn('resume',next(e for e in self.events() if e['id']=='android')['args'])
 
+    def auto_config(self, checks):
+        table = ', '.join(json.dumps(key) + ' = ' + json.dumps(value) for key, value in checks.items())
+        self.config.write_text('name="demo"\navailability={' + table + '}\n[[agents]]\nid="android"\nfolder="android space"\nagent="auto"\ncandidates=["codex","copilot"]\n')
+
+    def test_auto_skips_exhausted_and_keeps_selected_engine(self):
+        self.auto_config({'codex': ['python3', '-c', 'raise SystemExit(1)'],
+                          'copilot': ['python3', '-c', 'raise SystemExit(0)']})
+        self.cli('check', self.config)
+        self.assertEqual(self.events(), [])
+        self.cli(self.config, '--detach')
+        self.wait(lambda: len(self.events()) == 1)
+        self.assertEqual(self.events()[0]['args'][0], '--session-id')
+        self.assertIn('\tcopilot', self.cli('status', self.config).stdout)
+        # Reattaching must not re-run checks or replace a running CLI.
+        self.auto_config({'codex': ['python3', '-c', 'raise SystemExit(0)'],
+                          'copilot': ['python3', '-c', 'raise SystemExit(1)']})
+        self.cli(self.config, '--detach')
+        self.assertEqual(len(self.events()), 1)
+        self.assertIn('\tcopilot', self.cli('status', self.config).stdout)
+        self.cli('send', self.config, 'android', 'Check the API')
+        self.wait(lambda: any(e.get('message') == 'Check the API' for e in self.events()))
+
+    def test_auto_does_not_treat_unknown_as_available_or_leak_output(self):
+        self.auto_config({'codex': ['python3', '-c', 'print("private-details"); raise SystemExit(2)'],
+                          'copilot': ['python3', '-c', 'raise SystemExit(1)']})
+        result = self.cli(self.config, '--detach', ok=False)
+        self.assertNotIn('private-details', result.stdout + result.stderr)
+        self.assertIn('no candidate has confirmed', result.stderr)
+        self.assertEqual(self.events(), [])
+
+    def test_availability_checks_are_cached_and_literal(self):
+        marker = self.root/'checks'
+        self.auto_config({'codex': ['python3', '-c',
+            'from pathlib import Path; p=Path("checks"); p.write_text(p.read_text()+"x" if p.exists() else "x")'],
+            'copilot': ['python3', '-c', 'raise SystemExit(1)']})
+        self.config.write_text(self.config.read_text() + '\n[[agents]]\nid="ios"\nfolder="ios"\nagent="auto"\n')
+        self.start()
+        self.assertEqual(marker.read_text(), 'x')
+        self.assertEqual({e['args'][0] for e in self.events()}, {'--no-daemon'})
+        result = self.cli('availability', self.config)
+        self.assertIn('codex\tavailable', result.stdout)
+        self.assertIn('copilot\tunavailable', result.stdout)
+
+    def test_invalid_auto_configuration(self):
+        for suffix in ['candidates=[]', 'candidates=["codex","codex"]',
+                       'candidates=["auto"]', 'candidates=["codex; echo bad"]',
+                       'args=["--model","other"]', 'resume="12345678-1234-1234-1234-123456789abc"']:
+            self.config.write_text('[[agents]]\nid="a"\nfolder="ios"\nagent="auto"\n' + suffix)
+            self.cli('check', self.config, ok=False)
+
+    def test_auto_detects_resolved_workspace_conflict(self):
+        self.auto_config({'codex': ['python3', '-c', 'raise SystemExit(0)']})
+        self.config.write_text(self.config.read_text() + '\n[[agents]]\nid="other"\nfolder="android space"\nagent="codex"\n')
+        self.cli(self.config, '--detach', ok=False)
+        self.assertEqual(self.events(), [])
+
+    def test_auto_custom_candidate_and_literal_checker_arguments(self):
+        literal = '$(touch should-not-exist); `echo bad`'
+        self.auto_config({'devin': ['python3', '-c',
+            'import sys; assert sys.argv[1] == ' + repr(literal), literal]})
+        self.config.write_text(self.config.read_text().replace('candidates=["codex","copilot"]', 'candidates=["missing-xc-agent-123","devin"]'))
+        self.cli(self.config, '--detach')
+        self.wait(lambda: len(self.events()) == 1)
+        self.assertEqual(self.events()[0]['args'], [])
+        self.assertIn('\tdevin', self.cli('status', self.config).stdout)
+        self.assertFalse((self.root/'should-not-exist').exists())
+
 
 class ResumeTest(unittest.TestCase):
     def test_read_only_interactive_metadata(self):
@@ -167,5 +234,34 @@ class ResumeTest(unittest.TestCase):
             with patch.dict(os.environ,{'CODEX_HOME':directory}):
                 self.assertEqual(xc.latest_codex('/project'),'interactive')
             self.assertEqual(before,db.read_bytes())
+
+
+class AvailabilityTest(unittest.TestCase):
+    def test_native_quota_decisions(self):
+        for window in ('primary', 'secondary'):
+            self.assertEqual(xc.codex_limits({'rateLimits': {window: {'usedPercent': 100}}}), 'unavailable')
+        self.assertEqual(xc.codex_limits({'rateLimits': {'primary': {'usedPercent': 50}, 'secondary': {'usedPercent': 99}}}), 'available')
+        for bucket in [{}, {'primary': {'usedPercent': True}}, {'primary': {'usedPercent': -1}}]:
+            self.assertEqual(xc.codex_limits({'rateLimits': bucket}), 'unknown')
+        self.assertEqual(xc.codex_limits({'rateLimits': {'primary': {'usedPercent': 0}, 'rateLimitReachedType': 'monthly'}}), 'unavailable')
+        self.assertEqual(xc.codex_limits({'rateLimits': {'primary': {'usedPercent': 0}}, 'rateLimitsByLimitId': {'codex': {'primary': {'usedPercent': 100}}}}), 'unavailable')
+        self.assertEqual(xc.codex_limits({'rateLimits': {'limitId': 'another-model', 'primary': {'usedPercent': 0}}}), 'unknown')
+        self.assertEqual(xc.codex_limits({'rateLimitsByLimitId': []}), 'unknown')
+
+    def test_app_server_read_only_protocol_and_timeout(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            executable = root/'codex'
+            log = root/'rpc'
+            executable.write_text('#!/usr/bin/env python3\nimport json,sys,os\nfor line in sys.stdin:\n m=json.loads(line)\n with open(os.environ["RPC_LOG"],"a") as f:f.write(m["method"]+"\\n")\n if m["method"]=="initialize":print(json.dumps({"id":0,"result":{}}),flush=True)\n if m["method"]=="account/rateLimits/read":print(json.dumps({"id":1,"result":{"rateLimits":{"primary":{"usedPercent":25}}}}),flush=True)\n')
+            executable.chmod(0o755)
+            with patch.dict(os.environ, {'PATH': directory + ':' + os.environ['PATH'], 'RPC_LOG': str(log)}):
+                self.assertEqual(xc.codex_availability(timeout=2), 'available')
+                self.assertEqual(log.read_text().splitlines(), ['initialize', 'initialized', 'account/rateLimits/read'])
+                executable.write_text('#!/usr/bin/env python3\nimport time\ntime.sleep(30)\n')
+                start = time.monotonic()
+                self.assertEqual(xc.codex_availability(timeout=.1), 'unknown')
+                self.assertLess(time.monotonic()-start, 3)
 
 if __name__=='__main__': unittest.main()

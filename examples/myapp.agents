@@ -1,4 +1,6 @@
 # Save beside myapp-android, myapp-ios and myapp-server.
+# To select by confirmed quota, use agent = "auto" and optionally
+# candidates = ["codex", "copilot", "claude"]. See README for checker support.
 name = "myapp"
 
 [[agents]]

@@ -3,19 +3,32 @@
 import argparse
 import fcntl
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
+import selectors
 import shlex
 import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
+import time
 import tomllib
 import uuid
 
 SCRIPT = Path(__file__).resolve()
 STATE = Path(os.environ.get('XDG_STATE_HOME', str(Path.home() / '.local/state'))) / 'xcontrol'
+BUILTINS = ('codex', 'copilot', 'claude')
+
+
+def executable(value):
+    return isinstance(value, str) and re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.+-]*', value) and value != 'auto'
+
+
+def argv(value):
+    return isinstance(value, list) and all(isinstance(arg, str) and '\x00' not in arg for arg in value)
 
 
 def run(*args, check=True):
@@ -30,8 +43,11 @@ def load(filename):
     path = Path(filename).expanduser().resolve(strict=True)
     with path.open('rb') as stream:
         config = tomllib.load(stream)
-    if set(config) - {'name', 'agents'}:
-        raise ValueError('Config supports only name and [[agents]].')
+    if set(config) - {'name', 'agents', 'availability'}:
+        raise ValueError('Config supports only name, [[agents]], and [availability].')
+    checks = config.get('availability', {})
+    if not isinstance(checks, dict) or any(not executable(engine) or not argv(cmd) or not cmd or not cmd[0] for engine, cmd in checks.items()):
+        raise ValueError('availability maps CLI names to nonempty argument lists.')
     name = config.get('name', path.stem)
     if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_-]*', name):
         raise ValueError('name must contain letters, numbers, underscores or hyphens.')
@@ -41,18 +57,26 @@ def load(filename):
     seen = set()
     workspaces = set()
     for agent in agents:
-        if not isinstance(agent, dict) or set(agent) - {'id', 'folder', 'agent', 'role', 'resume', 'args'}:
-            raise ValueError('Agent fields: id, folder, agent, role, resume, args.')
+        if not isinstance(agent, dict) or set(agent) - {'id', 'folder', 'agent', 'role', 'resume', 'args', 'candidates'}:
+            raise ValueError('Agent fields: id, folder, agent, role, resume, args, candidates.')
         ident = agent.get('id', '')
         if not isinstance(ident, str) or not re.fullmatch(r'[A-Za-z0-9_-]+', ident) or ident in seen:
             raise ValueError('Each agent needs a unique id of letters, numbers, _ or -.')
         seen.add(ident)
         engine = agent.get('agent', 'codex')
-        if not isinstance(engine, str) or not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.+-]*', engine):
+        if engine != 'auto' and not executable(engine):
             raise ValueError('agent must be an executable name on PATH, without shell syntax or paths.')
         extra_args = agent.get('args', [])
-        if not isinstance(extra_args, list) or any(not isinstance(arg, str) or '\x00' in arg for arg in extra_args):
+        if not argv(extra_args):
             raise ValueError('args must be a list of strings without NUL bytes.')
+        candidates = agent.get('candidates', list(BUILTINS))
+        if engine == 'auto':
+            if not isinstance(candidates, list) or not candidates or any(not executable(c) for c in candidates) or len(set(candidates)) != len(candidates):
+                raise ValueError('candidates must be a nonempty list of unique CLI names.')
+            if extra_args or agent.get('resume', 'auto') not in ('auto', 'new'):
+                raise ValueError('Auto agents use resume = auto or new and no CLI-specific args.')
+        elif 'candidates' in agent:
+            raise ValueError('candidates applies only to agent = auto.')
         folder = agent.get('folder')
         if not isinstance(folder, str) or not folder:
             raise ValueError('Each agent needs a folder.')
@@ -64,7 +88,7 @@ def load(filename):
         if key in workspaces:
             raise ValueError('Use separate folders/worktrees for agents using the same CLI.')
         workspaces.add(key)
-        builtin = engine in ('codex', 'claude', 'copilot')
+        builtin = engine in BUILTINS or engine == 'auto'
         resume = agent.get('resume', 'auto' if builtin else 'new')
         if not builtin and resume != 'new':
             raise ValueError('Custom agents use resume = new; configure their native resume flags in args.')
@@ -72,9 +96,118 @@ def load(filename):
             raise ValueError('resume must be auto, new, or a session UUID.')
         if not isinstance(agent.get('role', ''), str):
             raise ValueError('role must be text.')
-        agent.update(agent=engine, folder=str(cwd), resume=resume, args=extra_args)
+        agent.update(agent=engine, folder=str(cwd), resume=resume, args=extra_args,
+                     candidates=candidates, checks=checks)
     digest = hashlib.sha256(str(path).encode()).hexdigest()[:10]
     return path, f'xc-{name}-{digest}', agents
+
+
+def codex_limits(result):
+    """Conservative decision for the default Codex quota bucket, never paid credits."""
+    buckets = result.get('rateLimitsByLimitId')
+    if buckets is not None and not isinstance(buckets, dict):
+        return 'unknown'
+    bucket = (buckets or {}).get('codex') or result.get('rateLimits')
+    if not isinstance(bucket, dict):
+        return 'unknown'
+    if bucket.get('limitId') not in (None, 'codex'):
+        return 'unknown'
+    if bucket.get('rateLimitReachedType'):
+        return 'unavailable'
+    windows = [bucket.get(k) for k in ('primary', 'secondary') if bucket.get(k) is not None]
+    percentages = [w.get('usedPercent') if isinstance(w, dict) else None for w in windows]
+    if not percentages or any(type(n) not in (int, float) or not 0 <= n <= 100 for n in percentages):
+        return 'unknown'
+    return 'unavailable' if any(n >= 100 for n in percentages) else 'available'
+
+
+def codex_availability(timeout=10):
+    """Use the documented app-server account read, without creating a thread/turn."""
+    with tempfile.TemporaryDirectory(prefix='xc-quota-') as cwd:
+        with subprocess.Popen(['codex', 'app-server'], cwd=cwd, stdin=subprocess.PIPE,
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as proc:
+            try:
+                def write(message):
+                    proc.stdin.write((json.dumps(message) + '\n').encode())
+                    proc.stdin.flush()
+                write({'id': 0, 'method': 'initialize', 'params': {
+                    'clientInfo': {'name': 'xcontrol', 'version': '1.0'}}})
+                deadline, buffer = time.monotonic() + timeout, b''
+                with selectors.DefaultSelector() as selector:
+                    selector.register(proc.stdout, selectors.EVENT_READ)
+                    while time.monotonic() < deadline:
+                        if not selector.select(max(0, deadline - time.monotonic())):
+                            break
+                        chunk = os.read(proc.stdout.fileno(), 65536)
+                        if not chunk:
+                            break
+                        buffer += chunk
+                        if len(buffer) > 1048576:
+                            break
+                        while b'\n' in buffer:
+                            line, buffer = buffer.split(b'\n', 1)
+                            message = json.loads(line)
+                            if 'error' in message and message.get('id') in (0, 1):
+                                return 'unknown'
+                            if message.get('id') == 0 and 'result' in message:
+                                write({'method': 'initialized'})
+                                write({'id': 1, 'method': 'account/rateLimits/read'})
+                            elif message.get('id') == 1 and isinstance(message.get('result'), dict):
+                                return codex_limits(message['result'])
+                return 'unknown'
+            except (OSError, ValueError, TypeError, AttributeError):
+                return 'unknown'
+            finally:
+                if proc.poll() is None:
+                    proc.terminate()
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+
+
+def availability(engine, checks, cwd):
+    if not shutil.which(engine):
+        return 'not installed'
+    try:
+        if engine in checks:
+            # Suppress checker output: it may contain account details or credentials.
+            code = subprocess.run(checks[engine], cwd=cwd, stdin=subprocess.DEVNULL,
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                  timeout=5).returncode
+            return {0: 'available', 1: 'unavailable'}.get(code, 'unknown')
+        if engine == 'codex':
+            return codex_availability()
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return 'unknown'
+
+
+def resolve_agents(agents, path):
+    cache, resolved = {}, []
+    for agent in agents:
+        chosen = dict(agent)
+        if agent['agent'] == 'auto':
+            for candidate in agent['candidates']:
+                if candidate not in cache:
+                    cache[candidate] = availability(candidate, agent['checks'], path.parent)
+                state = cache[candidate]
+                print(f"{agent['id']}: {candidate}: {state}", file=sys.stderr)
+                if state == 'available':
+                    chosen['agent'] = candidate
+                    if candidate not in BUILTINS:
+                        chosen['resume'] = 'new'
+                    break
+            else:
+                raise ValueError(f"{agent['id']}: no candidate has confirmed available usage. Configure [availability] checks or select an agent explicitly.")
+        if not shutil.which(chosen['agent']):
+            raise ValueError('Missing dependency: ' + chosen['agent'])
+        resolved.append(chosen)
+    keys = [(a['agent'], a['folder']) for a in resolved]
+    if len(set(keys)) != len(keys):
+        raise ValueError('Auto selection resolved to duplicate CLI/folder pairs; use separate worktrees.')
+    return resolved
 
 
 def latest_codex(cwd):
@@ -152,32 +285,38 @@ def send(session, ident, message):
         tmux('delete-buffer', '-b', buffer, check=False)
 
 
-def pane(filename, ident):
+def pane(filename, ident, selected=None):
     path, session, agents = load(filename)
     agent = next(a for a in agents if a['id'] == ident)
+    if agent['agent'] == 'auto':
+        if selected not in agent['candidates']:
+            raise ValueError('Missing or invalid resolved auto agent; reopen the group.')
+        agent['agent'] = selected
+        if selected not in BUILTINS:
+            agent['resume'] = 'new'
     key = hashlib.sha256((agent['agent'] + ':' + agent['folder']).encode()).hexdigest()
     with lock(key + '.lock', blocking=True):
         os.chdir(agent['folder'])
         os.environ['XCONTROL_CONFIG'] = str(path)
         os.environ['XCONTROL_AGENT'] = ident
         os.environ['XCONTROL_SESSION'] = session
-        print(f"xcontrol · {ident}: {agent.get('role', '')}", flush=True)
+        print(f"xcontrol · {ident} · {agent['agent']}: {agent.get('role', '')}", flush=True)
         print(f"Peers: xc status {shlex.quote(str(path))}", flush=True)
         # close_fds keeps the launcher lock out of the agent's descendants.
         return subprocess.call(command(agent))
 
 
 def main():
-    if len(sys.argv) == 4 and sys.argv[1] == '--pane':
-        return pane(sys.argv[2], sys.argv[3])
+    if len(sys.argv) in (4, 5) and sys.argv[1] == '--pane':
+        return pane(*sys.argv[2:])
     parser = argparse.ArgumentParser(description=__doc__, epilog='Examples: xc myapp.agents | xc status myapp.agents | xc send myapp.agents ios "Review the shared API"')
-    parser.add_argument('action_or_file', help='project.agents, check, status, send, or stop')
+    parser.add_argument('action_or_file', help='project.agents, check, availability, status, send, or stop')
     parser.add_argument('rest', nargs='*')
     parser.add_argument('--detach', action='store_true', help='start without attaching')
     parser.add_argument('-k', '--kill', action='store_true', help='close this project group')
     args = parser.parse_args()
     action = args.action_or_file
-    if action in ('check', 'status', 'send', 'stop'):
+    if action in ('check', 'availability', 'status', 'send', 'stop'):
         if not args.rest:
             parser.error('A .agents file is required.')
         filename, *extra = args.rest
@@ -192,6 +331,14 @@ def main():
     if action == 'check':
         print(f'Valid: {path} ({len(agents)} agents; session {session})')
         return 0
+    if action == 'availability':
+        cache = {}
+        for agent in agents:
+            for engine in agent['candidates'] if agent['agent'] == 'auto' else [agent['agent']]:
+                if engine not in cache:
+                    cache[engine] = availability(engine, agent['checks'], path.parent)
+                    print(f'{engine}\t{cache[engine]}')
+        return 0
     if not shutil.which('tmux'):
         raise ValueError('Missing dependency: tmux.')
     if action in ('status', 'send', 'stop'):
@@ -199,18 +346,17 @@ def main():
             raise ValueError('Project group is not running.')
         if action == 'status':
             for ident, target, process, dead in peers(session):
-                print(f'{ident}\t{target}\t{process}\t' + ('exited' if dead == '1' else 'running'))
+                engine = tmux('show-options', '-pqv', '-t', target, '@xcontrol_engine')
+                print(f'{ident}\t{target}\t{process}\t' + ('exited' if dead == '1' else 'running') + f'\t{engine}')
         elif action == 'send':
             send(session, *extra)
         else:
             tmux('kill-session', '-t', '=' + session)
             print('Closed project group; saved CLI conversations remain.')
         return 0
-    for agent in agents:
-        if not shutil.which(agent['agent']):
-            raise ValueError('Missing dependency: ' + agent['agent'])
     with lock('launcher.lock', blocking=True):
         if not managed(path, session):
+            agents = resolve_agents(agents, path)
             # Hold all workspace locks until each pane has been created. Panes take
             # ownership afterwards; a simultaneous launch is serialized above.
             guards = []
@@ -219,7 +365,7 @@ def main():
                     key = hashlib.sha256((agent['agent'] + ':' + agent['folder']).encode()).hexdigest()
                     guards.append(lock(key + '.lock'))
                 for index, agent in enumerate(agents):
-                    cmd = shlex.join([sys.executable, str(SCRIPT), '--pane', str(path), agent['id']])
+                    cmd = shlex.join([sys.executable, str(SCRIPT), '--pane', str(path), agent['id'], agent['agent']])
                     if index == 0:
                         target = tmux('new-session', '-d', '-s', session, '-n', 'agents', '-c', agent['folder'], '-x', '200', '-y', '50', '-P', '-F', '#{pane_id}', cmd)
                         tmux('set-option', '-t', session, '@xcontrol_config', str(path))
@@ -229,6 +375,7 @@ def main():
                     else:
                         target = tmux('split-window', '-t', target, '-c', agent['folder'], '-P', '-F', '#{pane_id}', cmd)
                     tmux('set-option', '-p', '-t', target, '@xcontrol_id', agent['id'])
+                    tmux('set-option', '-p', '-t', target, '@xcontrol_engine', agent['agent'])
                     tmux('select-pane', '-t', target, '-T', agent['id'] + ' · ' + agent['agent'])
                     tmux('select-layout', '-t', session + ':agents', 'tiled')
                 tmux('select-pane', '-t', peers(session)[0][1])
