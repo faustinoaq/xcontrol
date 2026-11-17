@@ -65,6 +65,15 @@ class LauncherTest(unittest.TestCase):
         self.cli('check', self.config)
         self.assertEqual(self.events(), [])
 
+    def test_socket_denial_is_not_reported_as_missing_group(self):
+        fake = self.root/'bin'/'tmux'
+        fake.write_text('#!/usr/bin/env python3\nimport sys\nprint("error connecting to /tmp/tmux-test/default (Operation not permitted)",file=sys.stderr)\nsys.exit(1)\n')
+        fake.chmod(0o755)
+        result = self.cli('status', self.config, ok=False)
+        self.assertIn('Cannot access the tmux socket', result.stderr)
+        self.assertNotIn('Project group is not running', result.stderr)
+        self.assertIn('normal terminal', result.stderr)
+
     def test_mixed_launch_reattach_and_stop(self):
         self.start()
         events = self.events()

@@ -258,7 +258,16 @@ def lock(name, blocking=False):
 
 
 def managed(path, session):
-    if run('tmux', 'has-session', '-t', '=' + session, check=False).returncode:
+    result = run('tmux', 'has-session', '-t', '=' + session, check=False)
+    if result.returncode:
+        detail = result.stderr.strip()
+        if any(error in detail.lower() for error in ('operation not permitted', 'permission denied', 'access denied')):
+            raise ValueError('Cannot access the tmux socket from this process. The group may still be running. '
+                             'Agent sandbox permissions can block local sockets; restarting the group will not fix that. '
+                             'Run xc status from your normal terminal to verify, then explicitly allow the tmux '
+                             'socket in the agent permission settings if appropriate. Details: ' + detail)
+        if detail and not any(error in detail.lower() for error in ('no server running', 'no such file or directory', 'can\'t find session', 'connection refused')):
+            raise ValueError('Cannot query tmux: ' + detail)
         return False
     if tmux('show-options', '-qv', '-t', session, '@xcontrol_config') != str(path):
         raise ValueError('Existing tmux session is not owned by this configuration.')

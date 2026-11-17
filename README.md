@@ -185,6 +185,12 @@ The included [skill](skills/xcontrol/SKILL.md) supports prompts such as:
 
 The installer makes it discoverable by Codex. For another agent that supports `SKILL.md`, copy `skills/xcontrol` to that tool's skill directory.
 
+## Agent cannot find a visible group
+
+`xc status` and `xc send` need access to the local tmux Unix socket. A CLI can be visible in a pane while its sandboxed shell commands are denied access to that socket. xcontrol reports this as **Cannot access the tmux socket**, rather than claiming the group has stopped.
+
+Run `xc status myapp.agents` from your normal terminal to distinguish a stopped group from an agent permission restriction. If it works there but fails inside the agent, inspect that CLI's local socket permissions. Codex supports explicit [Unix socket permissions](https://learn.chatgpt.com/docs/permissions#unix-sockets), subject to your version and managed policy. Allowing a tmux socket grants control over that tmux server, so choose that access explicitly. xcontrol does not change sandbox permissions automatically. Do not restart working agents merely because a sandbox cannot query tmux.
+
 ## Related tools
 
 There are many ways to run multiple coding agents. These projects include graphical interfaces, terminal workspaces, and agent managers. Their scope varies; the table identifies what each one provides.
