@@ -1,0 +1,20 @@
+# Save beside myapp-android, myapp-ios and myapp-server.
+name = "myapp"
+
+[[agents]]
+id = "android"
+folder = "./myapp-android"
+agent = "codex"
+role = "Android app; coordinate API contracts with server."
+
+[[agents]]
+id = "ios"
+folder = "./myapp-ios"
+agent = "copilot"
+role = "Native iOS app; coordinate API contracts with server."
+
+[[agents]]
+id = "server"
+folder = "./myapp-server"
+agent = "codex"
+role = "Backend services and shared APIs; coordinate changes with android and ios."

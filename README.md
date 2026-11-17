@@ -1,10 +1,16 @@
+<p><img src="assets/logo.svg" alt="xcontrol logo: connected terminal panes" width="380"></p>
+
 # xcontrol
 
-A small wrapper around tmux that opens and resumes your Codex, Copilot and Claude sessions and lets agents communicate with each other. Define the folders and agents in one `.agents` file, then open the project:
+A small wrapper around tmux that opens and resumes your CLI agent sessions, including Codex, Copilot and Claude and lets agents communicate with each other. Define the folders and agents in one `.agents` file, then open the project:
 
 ```sh
 xc myapp.agents
 ```
+
+![xcontrol running Android, iOS, and server agents in tmux](assets/myapp-tmux.png)
+
+A real tmux capture using the `myapp` folders with three Codex sessions. The example prompts are typed but have not been submitted. You can mix CLI agents in the same group, as shown below.
 
 ## Why xcontrol?
 
@@ -64,11 +70,30 @@ agent = "codex"
 role = "Backend services and shared APIs; coordinate changes with android and ios."
 ```
 
-Folders resolve relative to the `.agents` file, not your terminal directory. Absolute paths and `~` also work. Each agent has a unique ID, its own working directory, CLI, and optional role. Up to 16 agents fit in a tiled layout; terminal size limits how many are practical.
+Folders resolve relative to the `.agents` file, not your terminal directory. Absolute paths and `~` also work. Each agent has a unique ID, its own working directory, CLI executable name, and optional role and argument list. Up to 16 agents fit in a tiled layout; terminal size limits how many are practical.
 
 Optional `resume = "auto"` is the default: Codex resumes its latest unarchived interactive CLI thread for that exact directory, using read-only local SQLite metadata. Claude uses its native `--continue` in that directory. Copilot uses a stable workspace-specific native `--session-id`, creating or resuming its xcontrol conversation without selecting an unrelated global session. `resume = "new"` starts fresh; a session UUID resumes an explicit native conversation. Histories are not converted between CLIs. If Codex's metadata is unavailable, it starts fresh with a warning.
 
-The CLI inherits your normal permissions, model, and authentication. No permission bypass options are added. Roles are printed in each pane; they are **not automatically sent as prompts**. A `.agents` file is configuration, not executable code: arbitrary commands and extra fields are rejected.
+The CLI inherits your normal permissions, model, and authentication. No permission bypass options are added. Roles are printed in each pane; they are **not automatically sent as prompts**. The `agent` field names an executable on your PATH, and optional `args` are passed as literal arguments. xcontrol does not evaluate shell syntax. Use configuration files you trust: launching an agent runs that executable with your normal account access.
+
+## Other CLI agents, including Devin
+
+Any interactive CLI agent on your PATH can run in a pane. Codex, Copilot, and Claude have built-in resume handling. Other agents use the executable and arguments you provide.
+
+For example, [Devin CLI](https://docs.devin.ai/cli) starts locally with `devin`. To use it for the server, replace the server entry with:
+
+```toml
+[[agents]]
+id = "server"
+folder = "./myapp-server"
+agent = "devin"
+args = []
+role = "Backend services; coordinate API contracts with android and ios."
+```
+
+Install and authenticate the CLI separately. Custom agents default to `resume = "new"`; xcontrol does not guess their session flags. To resume a conversation, set `args` to that CLI's documented resume arguments. Arguments are passed directly, without a shell, environment-variable expansion, or command substitution. Optional `args` also work with the three built-in agents.
+
+The same `xc status` and `xc send` commands work with custom agents that accept terminal text input. Prompt submission and busy-state behavior depend on the CLI; xcontrol does not provide agent-specific readiness detection. Devin's launch command is documented by its vendor; the generic launcher is tested with a simulated executable, not a live Devin account.
 
 ## Commands
 

@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 460 120" role="img" aria-labelledby="title desc">
+  <title id="title">xcontrol</title>
+  <desc id="desc">Connected terminal panes beside the xcontrol wordmark.</desc>
+  <rect width="460" height="120" rx="24" fill="#111827"/>
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="22" y="22" width="76" height="76" rx="15" stroke="#475569" stroke-width="2"/>
+    <path d="M33 35h18v18H33zM69 35h18v18H69zM33 71h18v16H33zM69 71h18v16H69z" stroke="#67e8f9" stroke-width="3"/>
+    <path d="m47 49 26 26m0-26L47 75" stroke="#fbbf24" stroke-width="4"/>
+    <circle cx="60" cy="62" r="5" fill="#fbbf24" stroke="#111827" stroke-width="3"/>
+  </g>
+  <text x="122" y="77" fill="#f8fafc" font-family="DejaVu Sans Mono,ui-monospace,monospace" font-size="48" font-weight="700" letter-spacing="-2">xcontrol<tspan fill="#fbbf24">_</tspan></text>
+</svg>

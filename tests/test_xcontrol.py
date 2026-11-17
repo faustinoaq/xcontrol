@@ -24,7 +24,7 @@ class LauncherTest(unittest.TestCase):
         self.env = dict(os.environ, HOME=str(self.root), XDG_STATE_HOME=str(self.root/'state'), TMUX_TMPDIR=str(self.root), CODEX_HOME=str(self.root/'codex'), LOG=str(self.root/'events'))
         self.env.pop('TMUX', None)
         (self.root/'bin').mkdir()
-        for engine in ('codex', 'claude', 'copilot'):
+        for engine in ('codex', 'claude', 'copilot', 'devin'):
             script = self.root/'bin'/engine
             script.write_text('#!/usr/bin/env python3\nimport os,sys,json\nwith open(os.environ["LOG"],"a") as f:f.write(json.dumps({"id":os.environ["XCONTROL_AGENT"],"cwd":os.getcwd(),"args":sys.argv[1:],"config":os.environ["XCONTROL_CONFIG"]})+"\\n")\nfor line in sys.stdin:\n with open(os.environ["LOG"],"a") as f:f.write(json.dumps({"message":line.strip()})+"\\n")\n')
             script.chmod(0o755)
@@ -129,6 +129,22 @@ class LauncherTest(unittest.TestCase):
         (self.root/'events').unlink()
         self.start()
         self.assertEqual(next(e for e in self.events() if e['id']=='ios')['args'], args)
+
+    def test_custom_cli_literal_args_and_messages(self):
+        args = ['--example', '$(touch /tmp/xc-no-shell)', 'value with spaces']
+        import json
+        toml_args = json.dumps(args)
+        self.config.write_text(self.config.read_text().replace('agent="claude"', 'agent="devin"\nargs=' + toml_args))
+        self.start()
+        self.assertEqual(next(e for e in self.events() if e['id']=='ios')['args'], args)
+        self.cli('send', self.config, 'ios', 'Review the API contract')
+        self.wait(lambda:any(e.get('message')=='Review the API contract' for e in self.events()))
+
+    def test_custom_cli_rejects_unknown_resume_and_bad_args(self):
+        original = self.config.read_text()
+        for value in ['agent="devin"\nresume="auto"', 'agent="devin"\nargs="--flag"', 'agent="devin; echo bad"']:
+            self.config.write_text(original.replace('agent="claude"', value))
+            self.cli('check', self.config, ok=False)
 
     def test_explicit_and_new_sessions(self):
         config = self.config.read_text().replace('agent="codex"','agent="codex"\nresume="new"').replace('agent="claude"','agent="claude"\nresume="12345678-1234-1234-1234-123456789abc"')
