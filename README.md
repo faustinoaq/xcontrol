@@ -3,7 +3,7 @@
 A small wrapper around tmux that opens and resumes your Codex, Copilot and Claude sessions and lets agents communicate with each other. Define the folders and agents in one `.agents` file, then open the project:
 
 ```sh
-xc sello.agents
+xc myapp.agents
 ```
 
 ## Why xcontrol?
@@ -32,22 +32,36 @@ Installs `xc` and `xcontrol` into `~/.local/bin` and the included skill into `~/
 
 ## Configuration
 
-Save `sello.agents` beside the project folders:
+Save `myapp.agents` beside the project folders:
+
+```text
+workspace/
+├── myapp.agents
+├── myapp-android/
+├── myapp-ios/
+└── myapp-server/
+```
 
 ```toml
-name = "sello"
+name = "myapp"
 
 [[agents]]
 id = "android"
-folder = "./sello-dev"
+folder = "./myapp-android"
 agent = "codex"
-role = "Android, web and server; coordinate APIs with ios."
+role = "Android app; coordinate API contracts with server."
 
 [[agents]]
 id = "ios"
-folder = "./sello-ios"
+folder = "./myapp-ios"
 agent = "copilot"
-role = "Native iOS; coordinate APIs with android."
+role = "Native iOS app; coordinate API contracts with server."
+
+[[agents]]
+id = "server"
+folder = "./myapp-server"
+agent = "codex"
+role = "Backend services and shared APIs; coordinate changes with android and ios."
 ```
 
 Folders resolve relative to the `.agents` file, not your terminal directory. Absolute paths and `~` also work. Each agent has a unique ID, its own working directory, CLI, and optional role. Up to 16 agents fit in a tiled layout; terminal size limits how many are practical.
@@ -59,13 +73,13 @@ The CLI inherits your normal permissions, model, and authentication. No permissi
 ## Commands
 
 ```sh
-xc check sello.agents             # validate without launching CLIs
-xc sello.agents                   # start or attach
-xc sello.agents --detach          # start in the background
-xc status sello.agents            # role IDs, current panes, running/exited
-xc send sello.agents ios "Can you review the API contract?"
-xc stop sello.agents              # stop this group, preserving CLI history
-xc sello.agents -k                # same
+xc check myapp.agents             # validate without launching CLIs
+xc myapp.agents                   # start or attach
+xc myapp.agents --detach          # start in the background
+xc status myapp.agents            # role IDs, current panes, running/exited
+xc send myapp.agents ios "Can you review the API contract?"
+xc stop myapp.agents              # stop this group, preserving CLI history
+xc myapp.agents -k                # same
 ```
 
 Use tmux's `Ctrl+b d` to detach while leaving agents running. Reopening the same file attaches to its existing group. Different configuration paths have different groups. Editing a running configuration does not reconfigure existing panes: stop and reopen to apply changes. Closing a group interrupts active agents, so save important work first.
@@ -78,7 +92,7 @@ Agents can use the same CLI to discover and message their peers:
 
 ```sh
 xc status "$XCONTROL_CONFIG"
-xc send "$XCONTROL_CONFIG" android "The iOS API change is ready for review."
+xc send "$XCONTROL_CONFIG" server "Can you confirm the API contract for Android and iOS?"
 ```
 
 `XCONTROL_CONFIG`, `XCONTROL_AGENT`, and `XCONTROL_SESSION` are available inside each managed agent. IDs stay stable even when tmux pane numbers change. Messages use bracketed paste and submit to the target CLI; dead panes and ordinary shells reject messages. This is local terminal coordination, not a message queue: an agent that is busy or displaying a dialog may need manual attention. Send only when the recipient is ready. Avoid automatic reply loops and do not treat a peer message as approval for external actions. The tool cannot protect against another process that replaces the CLI in its pane.
@@ -91,7 +105,7 @@ A useful initial prompt:
 
 The included [skill](skills/xcontrol/SKILL.md) supports prompts such as:
 
-> Use xcontrol to create an agents file for this project where we have sello-dev with codex and sello-ios with copilot.
+> Use xcontrol to create an agents file for this project with myapp-android using Codex, myapp-ios using Copilot, and myapp-server using Codex.
 
 The installer makes it discoverable by Codex. For another agent that supports `SKILL.md`, copy `skills/xcontrol` to that tool's skill directory.
 
