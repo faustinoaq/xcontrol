@@ -776,6 +776,85 @@ def terminal_logo(stream):
     return '\n'.join(output) + '\n'
 
 
+def parse_cli(arguments):
+    parser = argparse.ArgumentParser(
+        prog='xc', description=__doc__,
+        usage='%(prog)s [-h] COMMAND ...\n       %(prog)s PROJECT [--detach | -k]',
+        epilog='Examples:\n  xc myapp.agents\n  xc list --check\n  xc switch myapp.agents server copilot\n\nUse xc COMMAND --help for command options.',
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.set_defaults(check=False, auto=False, stop=False, force=False,
+                        note='', detach=False, kill=False)
+    commands = parser.add_subparsers(prog='xc', dest='action', title='commands', metavar='COMMAND')
+    descriptions = {
+        'open': 'Start or reattach; xc PROJECT is shorthand.',
+        'list': 'List installed supported CLIs; optionally test access.',
+        'check': 'Validate an .agents file without model calls.',
+        'availability': 'Test model access for configured candidates.',
+        'status': 'Show running roles and providers.',
+        'send': 'Send a message to an agent.',
+        'compact': 'Request native context compaction at an idle prompt.',
+        'switch': 'Hand off one or all panes to another CLI.',
+        'watch': 'Watch for confirmed quota limits; opt-in.',
+        'stop': 'Close the project group, retaining native history.',
+        'logo': 'Show the terminal mascot.',
+    }
+    examples = {
+        'open': 'xc myapp.agents --detach',
+        'list': 'xc list --check',
+        'send': 'xc send myapp.agents server "Review the API changes"',
+        'switch': 'xc switch myapp.agents server copilot\n  xc switch myapp.agents --auto',
+        'watch': 'xc watch myapp.agents --detach\n  xc watch myapp.agents --stop',
+        'compact': 'xc compact myapp.agents server',
+    }
+    for action, description in descriptions.items():
+        sub = commands.add_parser(action, help=description, description=description,
+            epilog='Example:\n  ' + examples[action] if action in examples else None,
+            formatter_class=argparse.RawDescriptionHelpFormatter)
+        sub.set_defaults(command_parser=sub)
+        if action not in ('list', 'logo'):
+            config_only = action in ('check', 'availability')
+            sub.add_argument('project', metavar='CONFIG' if config_only else 'PROJECT',
+                             help='.agents file' if config_only else '.agents file or project directory')
+        if action in ('send', 'compact', 'switch'):
+            kwargs = {'nargs': '?'} if action == 'switch' else {}
+            sub.add_argument('agent_id', metavar='AGENT', help='role ID from xc status', **kwargs)
+        if action == 'send':
+            sub.add_argument('message', metavar='MESSAGE', help='literal message text')
+            sub.add_argument('--force', action='store_true', help='resend an identical recent message')
+        elif action == 'list':
+            sub.add_argument('--check', action='store_true', help='test model access (uses provider allowance)')
+        elif action == 'switch':
+            sub.add_argument('engine', nargs='?', metavar='CLI', help='destination CLI; omit for next available')
+            sub.add_argument('--auto', action='store_true', help='hand off all configured roles')
+            sub.add_argument('--note', default='', help='unfinished work and boundaries for the handoff')
+        elif action == 'open':
+            modes = sub.add_mutually_exclusive_group()
+            modes.add_argument('--detach', action='store_true', help='start without attaching')
+            modes.add_argument('-k', '--kill', action='store_true', help='close this project group')
+        elif action == 'watch':
+            modes = sub.add_mutually_exclusive_group()
+            modes.add_argument('--detach', action='store_true', help='run the watcher in the background')
+            modes.add_argument('--stop', action='store_true', help='disable the watcher; leave agents running')
+    if not arguments:
+        parser.print_help()
+        return parser, None
+    misplaced = {
+        '--check': 'Use xc list --check.',
+        '--auto': 'Use xc switch PROJECT --auto.',
+        '--force': 'Use xc send PROJECT AGENT MESSAGE --force.',
+        '--stop': 'Use xc watch PROJECT --stop.',
+        '--note': 'Use xc switch PROJECT AGENT [CLI] --note TEXT.',
+    }
+    if arguments[0] in misplaced:
+        parser.error(misplaced[arguments[0]])
+    # Keep the original xc PROJECT syntax, including launch flags before it.
+    if arguments[0] not in descriptions and arguments[0] not in ('-h', '--help'):
+        if not arguments[0].startswith('-') or arguments[0] in ('--detach', '-k', '--kill', '--'):
+            arguments = ['open', *arguments]
+    args = parser.parse_args(arguments)
+    return args.command_parser, args
+
+
 def main():
     if len(sys.argv) == 5 and sys.argv[1] == '--watch-worker':
         return watch_worker(*sys.argv[2:])
@@ -783,33 +862,14 @@ def main():
         return pane(*sys.argv[2:])
     if len(sys.argv) in (4, 5) and sys.argv[1] == '--pane':
         return pane(*sys.argv[2:])
-    parser = argparse.ArgumentParser(description=__doc__, epilog='Examples: xc myapp.agents | xc status myapp.agents | xc send myapp.agents ios "Review the shared API"')
-    parser.add_argument('action_or_file', nargs='?', help='directory, project.agents, logo, list, check, availability, status, send, compact, switch, watch, or stop')
-    parser.add_argument('rest', nargs='*')
-    parser.add_argument('--check', action='store_true', help='test model access with xc list (uses provider allowance)')
-    parser.add_argument('--auto', action='store_true', help='switch every configured pane to its next available CLI')
-    parser.add_argument('--stop', action='store_true', help='disable the optional quota watcher')
-    parser.add_argument('--force', action='store_true', help='resend a duplicate message with xc send')
-    parser.add_argument('--note', default='', help='context to add when switching a pane')
-    parser.add_argument('--detach', action='store_true', help='start without attaching')
-    parser.add_argument('-k', '--kill', action='store_true', help='close this project group')
-    args = parser.parse_args()
-    if args.action_or_file is None:
-        if args.detach or args.kill:
-            parser.error('A directory or .agents file is required.')
-        parser.print_help()
+    parser, args = parse_cli(sys.argv[1:])
+    if args is None:
         return 0
-    action = args.action_or_file
-    if args.force and action != 'send':
-        parser.error('--force applies only to send.')
+    action = args.action
     if action == 'logo':
-        if args.rest or args.check or args.auto or args.stop or args.note or args.kill or args.detach:
-            parser.error('Use xc logo.')
         print(terminal_logo(sys.stdout) + '\n  xcontrol')
         return 0
     if action == 'list':
-        if args.rest or args.auto or args.stop or args.note or args.kill or args.detach:
-            parser.error('Use xc list [--check].')
         name_width = max(len('Command'), max(map(len, HANDOFF_ENGINES)))
         label_width = max(len('Provider'), max(len(LABELS.get(engine, engine)) for engine in HANDOFF_ENGINES))
         print(f'{"Command":<{name_width}}  {"Provider":<{label_width}}  Status', flush=True)
@@ -827,18 +887,17 @@ def main():
                     print('\r\033[2K', end='', flush=True)
             print(prefix + status_text(state, sys.stdout), flush=True)
         return 0
-    if args.check:
-        parser.error('--check applies only to xc list.')
-    if args.auto and action != 'switch':
-        parser.error('--auto applies only to switch.')
-    if args.stop and action != 'watch':
-        parser.error('--stop applies only to watch.')
-    if action in ('check', 'availability', 'status', 'send', 'compact', 'switch', 'watch', 'stop'):
-        if not args.rest:
-            parser.error('A .agents file is required.')
-        filename, *extra = args.rest
-    else:
-        filename, extra, action = action, args.rest, ('stop' if args.kill else 'open')
+    filename = args.project
+    extra = []
+    if action in ('send', 'compact', 'switch'):
+        if args.agent_id is not None:
+            extra.append(args.agent_id)
+    if action == 'send':
+        extra.append(args.message)
+    elif action == 'switch' and args.engine is not None:
+        extra.append(args.engine)
+    elif action == 'open' and args.kill:
+        action = 'stop'
     if action == 'send':
         if len(extra) != 2:
             parser.error('Use xc send project.agents agent-id "message".')

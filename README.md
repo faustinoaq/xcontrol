@@ -83,6 +83,8 @@ xc stop myapp.agents             # close the group
 xc check myapp.agents            # validate the config, no model calls
 ```
 
+Use `xc --help` for the command list and `xc list --help` (or any command) for its options.
+
 Detach with `Ctrl+b d`. Agents keep running. Mouse support is on, so you can click panes, resize them, and scroll.
 
 Exiting an agent follows your tmux `remain-on-exit` setting. You can reopen its saved conversation later. To apply config changes, stop and reopen the group.

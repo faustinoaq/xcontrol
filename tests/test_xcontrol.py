@@ -411,6 +411,34 @@ class LauncherTest(unittest.TestCase):
             self.cli(option, cwd=self.root, ok=False)
         self.assertFalse((self.root/'state').exists())
 
+    def test_command_help_is_scoped_and_misplaced_flags_fail_without_launching(self):
+        for command, allowed, excluded in [
+                ('list','--check','--auto'), ('send','--force','--detach'),
+                ('switch','--note','--check'), ('watch','--stop','--force'),
+                ('compact','AGENT','--auto'), ('open','--detach','--check')]:
+            result=self.cli(command,'--help')
+            self.assertIn('usage: xc '+command,result.stdout)
+            self.assertIn(allowed,result.stdout)
+            self.assertNotIn(excluded,result.stdout)
+            self.assertNotIn('action_or_file',result.stdout)
+            self.assertNotIn('[rest ...]',result.stdout)
+        for flag in ['--check','--auto','--force','--stop','--note']:
+            result=self.cli(flag,ok=False)
+            self.assertEqual(result.returncode,2)
+            self.assertIn('Use xc ',result.stderr)
+        self.cli('list','--detach',ok=False)
+        self.cli('status',self.config,'--force',ok=False)
+        self.assertEqual(self.events(),[])
+        self.assertFalse((self.root/'state').exists())
+
+    def test_explicit_open_and_legacy_flag_first_launch_work(self):
+        self.cli('open',self.config,'--detach')
+        self.wait(lambda:len(self.events())==2)
+        self.cli('-k',self.config)
+        self.cli('--detach',self.config)
+        self.wait(lambda:len(self.events())==4)
+        self.assertIn('android',self.cli('status',self.config).stdout)
+
     def test_directory_bootstrap_launch_reattach_and_stop(self):
         script = self.root/'bin'/'codex'
         original = script.read_text()

@@ -156,6 +156,8 @@ Codex, Copilot and Claude retain built-in resume handling. The other supported C
 
 ## Commands
 
+Help is scoped to each command: `xc list --help` shows only list options. `xc --help` lists all commands. `xc PROJECT` remains shorthand for `xc open PROJECT`; launch flags such as `--detach` and `-k` still work before the project path. A misplaced flag such as `xc --check` fails with a usage hint and does not launch or probe anything.
+
 ```sh
 xc logo                          # show the SVG-derived terminal mascot
 xc compact myapp.agents server   # request native compaction at an idle prompt
