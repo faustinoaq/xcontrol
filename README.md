@@ -22,7 +22,7 @@ Keep `~/.local/bin` on your PATH. The installer links to this checkout, so keep 
 
 ## Local files
 
-xcontrol keeps setup configs, handoff snapshots, message hashes, watcher logs, and lock files in `$XDG_STATE_HOME/xcontrol` (default: `~/.local/state/xcontrol`). Handoff snapshots can contain private terminal output. Access checks use temporary `xc-probe-*` folders, removed on normal completion. Agent CLIs keep their own history and caches separately. See [file details](docs/reference.md#local-files).
+xcontrol keeps setup configs, handoff snapshots, message hashes, pending messages from MANUAL mode, watcher logs, and lock files in `$XDG_STATE_HOME/xcontrol` (default: `~/.local/state/xcontrol`). Handoff snapshots can contain private terminal output. Access checks use temporary `xc-probe-*` folders, removed on normal completion. Agent CLIs keep their own history and caches separately. See [file details](docs/reference.md#local-files).
 
 ## Uninstall
 
@@ -68,6 +68,10 @@ xc .
 A setup agent inspects the current folder and its immediate children, then suggests a team. In an empty folder, tell it what you want to build. The prompt limits discovery to your project; it does not sandbox filesystem access. It asks before writing your config. This checks model access with small calls that count toward your usage.
 
 Plain `xc` just shows help.
+
+Writing a message yourself? Press your tmux prefix, then `Alt+m` to toggle **MANUAL** mode for that pane. Peer messages wait in a local queue. Toggle it off when the agent has an empty, ready prompt; pending messages arrive together in one submission. Other panes keep working.
+
+For a group already running when you update xcontrol, run `xc manual myapp.agents --bind` once to install the shortcut without restarting agents. You can also use `xc manual myapp.agents server on` and `off`. This is an explicit pause, not automatic typing detection.
 
 ## A small example
 

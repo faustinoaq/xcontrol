@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import shlex
 import subprocess
 import tempfile
 import time
@@ -96,6 +97,59 @@ class LauncherTest(unittest.TestCase):
         self.cli('send',self.config,'ios',text)
         self.wait(lambda:any(e.get('message')==text for e in self.events()))
         self.cli('send',self.config,'unknown','hello',ok=False)
+
+    def test_manual_mode_preserves_draft_and_batches_pending_messages(self):
+        self.start()
+        target = next(line.split('\t')[1] for line in self.cli('status', self.config).stdout.splitlines()
+                      if line.startswith('ios\t'))
+        self.cli('manual', self.config, 'ios', 'on')
+        subprocess.run(['tmux', 'send-keys', '-t', target, '-l', 'My unfinished draft'], env=self.env, check=True)
+        for message in ('Review the API', 'Check the PDF'):
+            self.assertIn('queued', self.cli('send', self.config, 'ios', message).stdout)
+        self.assertIn('Duplicate message skipped', self.cli('send', self.config, 'ios', 'Review the API').stdout)
+        self.assertFalse(any('message' in e for e in self.events()))
+        self.assertIn('2 pending', self.cli('manual', self.config, 'ios').stdout)
+        # Peers remain usable while only this recipient is paused.
+        self.cli('send', self.config, 'android', 'Unrelated work')
+        self.wait(lambda: any(e.get('message') == 'Unrelated work' for e in self.events()))
+        subprocess.run(['tmux', 'send-keys', '-t', target, 'Enter'], env=self.env, check=True)
+        self.wait(lambda: any(e.get('message') == 'My unfinished draft' for e in self.events()))
+        files = list((self.root/'state/xcontrol').glob('pending-*.json'))
+        self.assertEqual(len(files), 1)
+        self.assertEqual(files[0].stat().st_mode & 0o777, 0o600)
+        self.assertEqual(json.loads(files[0].read_text()), ['Review the API', 'Check the PDF'])
+        self.cli('manual', self.config, 'ios', 'off')
+        self.wait(lambda: any(e.get('message') == '[2] Check the PDF' for e in self.events()))
+        self.assertIn('0 pending', self.cli('manual', self.config, 'ios').stdout)
+        self.assertEqual(json.loads(files[0].read_text()), [])
+        self.cli('send', self.config, 'ios', 'Normal delivery restored')
+        self.wait(lambda: any(e.get('message') == 'Normal delivery restored' for e in self.events()))
+
+    def test_manual_mode_blocks_compaction_and_switch_and_toggle_is_quiet(self):
+        self.start()
+        target = next(line.split('\t')[1] for line in self.cli('status', self.config).stdout.splitlines()
+                      if line.startswith('ios\t'))
+        command = shlex.join([str(CLI), '--toggle-manual']) + ' #{q:pane_id}'
+        subprocess.run(['tmux', 'run-shell', '-t', target, command], env=self.env, check=True)
+        self.assertIn('MANUAL on', self.cli('manual', self.config, 'ios').stdout)
+        self.assertIn('MANUAL', self.cli('compact', self.config, 'ios', ok=False).stderr)
+        self.assertIn('MANUAL', self.cli('switch', self.config, 'ios', 'copilot', ok=False).stderr)
+        self.assertEqual(self.cli('--toggle-manual', target).stdout, '')
+        self.assertIn('MANUAL off', self.cli('manual', self.config, 'ios').stdout)
+        shell = subprocess.check_output(['tmux', 'new-session', '-d', '-s', 'unmanaged', '-P', '-F', '#{pane_id}'], env=self.env, text=True).strip()
+        self.assertEqual(self.cli('--toggle-manual', shell).stdout, '')
+        self.assertEqual(len(self.events()), 2)
+
+    def test_manual_queue_bound_and_existing_shortcut_are_preserved(self):
+        self.start()
+        self.cli('manual', self.config, 'ios', 'on')
+        self.cli('send', self.config, 'ios', 'x' * 65536)
+        self.assertIn('queue is full', self.cli('send', self.config, 'ios', 'one more', ok=False).stderr)
+        subprocess.run(['tmux', 'bind-key', '-T', 'prefix', 'M-m', 'display-message', 'Custom action'], env=self.env, check=True)
+        self.assertIn('already bound', self.cli('manual', self.config, '--bind').stderr)
+        binding = subprocess.check_output(['tmux', 'list-keys', '-T', 'prefix', 'M-m'], env=self.env, text=True)
+        self.assertIn('Custom action', binding)
+        self.assertNotIn('--toggle-manual', binding)
 
     def test_agents_remain_discoverable_after_window_moves_and_renames(self):
         self.start()

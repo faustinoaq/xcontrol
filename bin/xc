@@ -441,17 +441,97 @@ def paste_message(target, message):
     # Serialize all senders to this pane, not just each sender's dedup route.
     delivery = hashlib.sha256(target.encode()).hexdigest()
     with lock('paste-' + delivery + '.lock', blocking=True):
-        # Bracketed paste keeps embedded newlines from submitting partial messages.
-        buffer = 'xc-' + os.urandom(8).hex()
-        subprocess.run(['tmux', 'load-buffer', '-b', buffer, '-'], input=message, text=True, check=True)
-        try:
-            tmux('paste-buffer', '-p', '-r', '-b', buffer, '-t', target)
-            # Let TUIs finish processing the paste before submitting it. tmux
-            # completing paste-buffer does not mean the application consumed it.
-            time.sleep(0.5)
-            tmux('send-keys', '-t', target, 'Enter')
-        finally:
-            tmux('delete-buffer', '-b', buffer, check=False)
+        if tmux('show-options', '-pqv', '-t', target, '@xcontrol_manual') == '1':
+            queue = pending_messages(target)
+            if len(queue) >= 128 or sum(len(item.encode()) for item in queue) + len(message.encode()) > 65536:
+                raise ValueError('Manual-mode queue is full (128 messages or 64 KiB); message not queued.')
+            save_pending(target, [*queue, message])
+            print(f'Message queued: pane is in MANUAL mode ({len(queue) + 1} pending).')
+            return
+        submit_message(target, message)
+
+
+def submit_message(target, message):
+    """Caller must hold this pane's delivery lock."""
+    # Bracketed paste keeps embedded newlines from submitting partial messages.
+    buffer = 'xc-' + os.urandom(8).hex()
+    subprocess.run(['tmux', 'load-buffer', '-b', buffer, '-'], input=message, text=True, check=True)
+    try:
+        tmux('paste-buffer', '-p', '-r', '-b', buffer, '-t', target)
+        # Let TUIs finish processing the paste before submitting it. tmux
+        # completing paste-buffer does not mean the application consumed it.
+        time.sleep(0.5)
+        tmux('send-keys', '-t', target, 'Enter')
+    finally:
+        tmux('delete-buffer', '-b', buffer, check=False)
+
+
+def pending_path(target):
+    # Include the server socket and pane creation identity to isolate tmux servers
+    # and prevent a reopened group from inheriting old pending messages.
+    identity = tmux('display-message', '-p', '-t', target,
+                    '#{socket_path}\t#{session_created}\t#{pane_id}\t#{pane_pid}')
+    return STATE / ('pending-' + hashlib.sha256(identity.encode()).hexdigest() + '.json')
+
+
+def pending_messages(target):
+    try:
+        messages = json.loads(pending_path(target).read_text())
+    except FileNotFoundError:
+        return []
+    if not isinstance(messages, list) or not all(isinstance(item, str) for item in messages):
+        raise ValueError('Invalid pending-message file; leaving it unchanged.')
+    return messages
+
+
+def save_pending(target, messages):
+    path = pending_path(target)
+    with tempfile.NamedTemporaryFile(mode='w', dir=STATE, delete=False) as stream:
+        temporary = Path(stream.name)
+        json.dump(messages, stream)
+    try:
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    tmux('set-option', '-p', '-t', target, '@xcontrol_pending', str(len(messages)))
+
+
+def manual(target, mode, quiet=False):
+    delivery = hashlib.sha256(target.encode()).hexdigest()
+    with lock('paste-' + delivery + '.lock', blocking=True):
+        paused = tmux('show-options', '-pqv', '-t', target, '@xcontrol_manual') == '1'
+        if mode == 'toggle':
+            mode = 'off' if paused else 'on'
+        if mode == 'on':
+            tmux('set-option', '-p', '-t', target, '@xcontrol_manual', '1')
+        elif mode == 'off':
+            messages = pending_messages(target)
+            if messages:
+                process = tmux('display-message', '-p', '-t', target, '#{pane_current_command}\t#{pane_dead}').split('\t')
+                if process[1] == '1' or process[0] in ('bash', 'sh', 'zsh', 'fish'):
+                    raise ValueError('Agent is not running; pending messages remain paused.')
+                # Deliver one model turn, never one turn per queued message.
+                batch = 'Queued xcontrol messages:\n\n' + '\n\n'.join(
+                    f'[{index}] {message}' for index, message in enumerate(messages, 1))
+                submit_message(target, batch)
+                save_pending(target, [])
+            tmux('set-option', '-p', '-t', target, '@xcontrol_manual', '')
+        state = tmux('show-options', '-pqv', '-t', target, '@xcontrol_manual') == '1'
+        if not quiet:
+            print(f'{target}: MANUAL {"on" if state else "off"}; {len(pending_messages(target))} pending.')
+
+
+def manual_controls(session):
+    marker = '#{?@xcontrol_manual, [MANUAL],}#{?@xcontrol_pending, [MAIL #{@xcontrol_pending}],}'
+    border = tmux('show-options', '-v', '-t', session, 'pane-border-format')
+    if marker not in border:
+        tmux('set-option', '-t', session, 'pane-border-format', border + marker)
+    binding = run('tmux', 'list-keys', '-T', 'prefix', 'M-m', check=False).stdout
+    if binding and '--toggle-manual' not in binding:
+        print('Shortcut prefix M-m is already bound; use xc manual PROJECT AGENT on/off.', file=sys.stderr)
+        return
+    command = shlex.join([sys.executable, str(SCRIPT), '--toggle-manual']) + ' #{q:pane_id}'
+    tmux('bind-key', '-T', 'prefix', 'M-m', 'run-shell', '-b', command)
 
 
 def compact(session, ident):
@@ -459,6 +539,14 @@ def compact(session, ident):
     if len(matches) != 1:
         raise ValueError(f'No unique live pane for agent {ident}.')
     target, process, dead = matches[0][1:]
+    delivery = hashlib.sha256(target.encode()).hexdigest()
+    with lock('paste-' + delivery + '.lock', blocking=True):
+        return compact_request(target, process, dead, ident)
+
+
+def compact_request(target, process, dead, ident):
+    if tmux('show-options', '-pqv', '-t', target, '@xcontrol_manual') == '1':
+        raise ValueError('Pane is in MANUAL mode; compaction is paused.')
     if dead == '1' or process in ('bash', 'sh', 'zsh', 'fish'):
         raise ValueError('Agent is not running; refusing to submit a command into a shell.')
     if os.environ.get('TMUX_PANE') == target:
@@ -557,6 +645,8 @@ def switch(path, session, agents, ident, engine='auto', note='', excluded=(), ca
     if agent is None or len(matches) != 1:
         raise ValueError(f'No unique pane for agent {ident}.')
     target = matches[0][1]
+    if tmux('show-options', '-pqv', '-t', target, '@xcontrol_manual') == '1':
+        raise ValueError('Pane is in MANUAL mode; provider switching is paused.')
     # Switching from the terminal being replaced would kill this command halfway through.
     if os.environ.get('TMUX_PANE') == target:
         raise ValueError('Run xc switch from another pane or terminal, not the pane being replaced.')
@@ -591,7 +681,10 @@ def switch(path, session, agents, ident, engine='auto', note='', excluded=(), ca
         raise ValueError('Handoff note must be at most 64 KiB.')
     key = hashlib.sha256((engine + ':' + agent['folder']).encode()).hexdigest()
     # Fail before interrupting the old agent if a managed peer owns this CLI/folder.
-    with lock(key + '.lock'):
+    delivery = hashlib.sha256(target.encode()).hexdigest()
+    with lock(key + '.lock'), lock('paste-' + delivery + '.lock', blocking=True):
+        if tmux('show-options', '-pqv', '-t', target, '@xcontrol_manual') == '1':
+            raise ValueError('Pane is in MANUAL mode; provider switching is paused.')
         for peer_id, peer_target, _, dead in peers(session):
             other = next((a for a in agents if a['id'] == peer_id), None)
             if peer_target != target and dead != '1' and other and other['folder'] == agent['folder']:
@@ -877,6 +970,7 @@ def parse_cli(arguments):
         'availability': 'Test model access for configured candidates.',
         'status': 'Show running roles and providers.',
         'send': 'Send a message to an agent.',
+        'manual': 'Pause peer input while typing; release queued messages when ready.',
         'compact': 'Request native context compaction at an idle prompt.',
         'switch': 'Hand off one or all panes to another CLI.',
         'watch': 'Watch for confirmed quota limits; opt-in.',
@@ -888,6 +982,7 @@ def parse_cli(arguments):
         'open': 'xc myapp.agents --detach',
         'list': 'xc list --check',
         'send': 'xc send myapp.agents server "Review the API changes"',
+        'manual': 'xc manual myapp.agents server on\n  xc manual myapp.agents server off\n  xc manual myapp.agents --bind',
         'switch': 'xc switch myapp.agents server copilot\n  xc switch myapp.agents --auto',
         'watch': 'xc watch myapp.agents --detach\n  xc watch myapp.agents --stop',
         'compact': 'xc compact myapp.agents server',
@@ -903,9 +998,12 @@ def parse_cli(arguments):
                              help='.agents file' if config_only else '.agents file or project directory')
         if action == 'stop':
             sub.add_argument('--all', action='store_true', help='close all xcontrol groups in this tmux server')
-        if action in ('send', 'compact', 'switch'):
-            kwargs = {'nargs': '?'} if action == 'switch' else {}
+        if action in ('send', 'compact', 'switch', 'manual'):
+            kwargs = {'nargs': '?'} if action in ('switch', 'manual') else {}
             sub.add_argument('agent_id', metavar='AGENT', help='role ID from xc status', **kwargs)
+        if action == 'manual':
+            sub.add_argument('mode', nargs='?', choices=('on', 'off', 'toggle', 'status'), default='status')
+            sub.add_argument('--bind', action='store_true', help='install shortcut and border markers without restarting agents')
         if action == 'send':
             sub.add_argument('message', metavar='MESSAGE', help='literal message text')
             sub.add_argument('--force', action='store_true', help='resend an identical recent message')
@@ -944,6 +1042,16 @@ def parse_cli(arguments):
 
 
 def main():
+    if len(sys.argv) == 3 and sys.argv[1] == '--toggle-manual':
+        target = sys.argv[2]
+        config = tmux('display-message', '-p', '-t', target, '#{@xcontrol_config}')
+        if not config or not tmux('show-options', '-pqv', '-t', target, '@xcontrol_id'):
+            return 0
+        path, session, _ = load(config)
+        if not managed(path, session) or target not in [p[1] for p in peers(session)]:
+            raise ValueError('Select a managed xcontrol agent pane.')
+        manual(target, 'toggle', quiet=True)
+        return 0
     if len(sys.argv) == 5 and sys.argv[1] == '--watch-worker':
         return watch_worker(*sys.argv[2:])
     if len(sys.argv) == 6 and sys.argv[1] == '--handoff-pane':
@@ -1015,10 +1123,12 @@ def main():
             parser.error('Use xc switch project.agents agent-id [cli], or xc switch project.agents --auto.')
     elif extra:
         parser.error('Unexpected arguments.')
+    if action == 'manual' and (bool(args.agent_id) == bool(args.bind)):
+        parser.error('Use xc manual PROJECT AGENT [on|off|toggle|status], or xc manual PROJECT --bind.')
     if args.note and action != 'switch':
         parser.error('--note applies only to switch.')
     if Path(filename).expanduser().is_dir():
-        if action not in ('open', 'status', 'send', 'compact', 'switch', 'watch', 'stop'):
+        if action not in ('open', 'status', 'send', 'compact', 'switch', 'watch', 'stop', 'manual'):
             parser.error('Use an .agents file for check or availability.')
         if not shutil.which('tmux'):
             raise ValueError('Missing dependency: tmux.')
@@ -1037,7 +1147,7 @@ def main():
         return 0
     if not shutil.which('tmux'):
         raise ValueError('Missing dependency: tmux.')
-    if action in ('status', 'send', 'compact', 'switch', 'watch', 'stop'):
+    if action in ('status', 'send', 'compact', 'switch', 'watch', 'stop', 'manual'):
         if not managed(path, session):
             raise ValueError('Project group is not running.')
         if action == 'status':
@@ -1046,6 +1156,13 @@ def main():
                 print(f'{ident}\t{target}\t{process}\t' + ('exited' if dead == '1' else 'running') + f'\t{engine}')
         elif action == 'send':
             send(session, *extra, force=args.force)
+        elif action == 'manual':
+            manual_controls(session)
+            if not args.bind:
+                matches = [p for p in peers(session) if p[0] == args.agent_id]
+                if len(matches) != 1:
+                    raise ValueError(f'No unique pane for agent {args.agent_id}.')
+                manual(matches[0][1], args.mode)
         elif action == 'compact':
             with lock('launcher.lock', blocking=True):
                 compact(session, *extra)
@@ -1095,6 +1212,7 @@ def main():
             finally:
                 for guard in guards:
                     guard.close()
+    manual_controls(session)
     if created and agents[0].get('watch'):
         watch(path, session, detached=True)
     if args.detach:

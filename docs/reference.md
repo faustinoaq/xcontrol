@@ -163,6 +163,7 @@ Persistent xcontrol state lives in `$XDG_STATE_HOME/xcontrol`, defaulting to `~/
 | `quickstart/<hash>/project.agents` | Setup configuration for `xc .` or `xc <directory>`. Retained for reattachment and reuse. |
 | `handoffs/<role>-*.md` | Recent terminal history, Git state, notes and previous handoff paths. Retained until you remove them; files have mode 600 and can contain private output. |
 | `send-*.json` | Up to 128 message hashes and timestamps per route, without message bodies. Entries expire after five minutes and are pruned on the next send; the file remains. Mode 600. |
+| `pending-*.json` | Message bodies queued during MANUAL mode, private mode 600. Successful release clears the bodies; files and abandoned queues remain until state cleanup. |
 | `watch-*.log` | Appended background quota-watcher logs. Retained until removed; mode 600. |
 | `*.lock` | Coordination and CLI/folder locks. Files may remain after exit; the OS releases the actual locks when their owning processes exit. Do not remove them while groups or watchers are running. |
 
@@ -220,9 +221,23 @@ xc status "$XCONTROL_CONFIG"
 xc send "$XCONTROL_CONFIG" server "Can you confirm the API contract for Android and iOS?"
 ```
 
-`XCONTROL_CONFIG`, `XCONTROL_AGENT`, and `XCONTROL_SESSION` are available inside each managed agent. IDs stay stable even when tmux pane numbers change. Messages preserve line breaks with bracketed paste, wait 0.5 seconds for paste processing, then send one Enter to the target pane ID. Pane focus is not required. Concurrent xcontrol deliveries to the same pane are serialized. Dead panes and ordinary shells reject messages. This is local terminal coordination, not a message queue: an agent that is busy or displaying a dialog may need manual attention. Send only when the recipient is ready. The paste delay reduces timing races but is not an acceptance acknowledgment; xcontrol does not retry Enter automatically. Avoid automatic reply loops and do not treat a peer message as approval for external actions. The tool cannot protect against another process that replaces the CLI in its pane.
+`XCONTROL_CONFIG`, `XCONTROL_AGENT`, and `XCONTROL_SESSION` are available inside each managed agent. IDs stay stable even when tmux pane numbers change. Messages preserve line breaks with bracketed paste, wait 0.5 seconds for paste processing, then send one Enter to the target pane ID. Pane focus is not required. Concurrent xcontrol deliveries to the same pane are serialized. Dead panes and ordinary shells reject messages. Outside MANUAL mode, delivery uses the terminal without a readiness queue: an agent that is busy or displaying a dialog may need manual attention. Send only when the recipient is ready. The paste delay reduces timing races but is not an acceptance acknowledgment; xcontrol does not retry Enter automatically. Avoid automatic reply loops and do not treat a peer message as approval for external actions. The tool cannot protect against another process that replaces the CLI in its pane.
 
 `xc send` makes no model calls, but delivering text can trigger the recipient's model. Exact duplicate messages from the same sender to the same pane are suppressed for five minutes, even if other messages were sent in between. It reports that the message was skipped and does not paste it. `xc send myapp.agents ios "message" --force` deliberately resends. Different messages and different senders remain independent; the guard resets for reopened groups and provider handoffs. It does not semantically summarize or truncate messages, enforce a token budget, or prevent every conversation loop.
+
+### Protect manual input
+
+Press your tmux prefix, then `Alt+m` to toggle MANUAL mode for the selected managed pane. The border shows `MANUAL` and a pending-message count. This only pauses xcontrol deliveries to that pane; the CLI keeps running and peers can still communicate elsewhere. New groups install the shortcut automatically. For an existing group, run `xc manual myapp.agents --bind`, without restarting or messaging agents. An existing prefix `Alt+m` binding is preserved with a warning. The binding lives in this tmux server's shared prefix table and acts only on managed panes. Custom prefix tables need their own binding.
+
+```sh
+xc manual myapp.agents server on
+xc manual myapp.agents server status
+xc manual myapp.agents server off
+```
+
+Turn it on before typing and wait for the MANUAL marker. Incoming `xc send` messages are saved locally instead of pasted, with normal duplicate suppression. Turn it off only after your draft is submitted or cleared and the agent is ready for another input. All pending messages are delivered as one numbered batch and one Enter, then the pause is lifted. This can wake a CLI waiting at its input prompt; it does not start a closed agent or confirm model acceptance. There is no automatic keyboard, readiness or completion detection. Direct tmux sends and native CLI activity are outside this protection. Compaction and provider switching through xcontrol refuse paused panes.
+
+Pending message bodies are private JSON files (`pending-*.json`, mode 600) in xcontrol's state directory, unlike the hash-only duplicate cache. Each queue is limited to 128 messages and 64 KiB of message text; excess sends fail without being cached as delivered. Files are updated atomically under the pane delivery lock. A failed delivery leaves the queue and pause in place; if interrupted after submission but before queue cleanup, a later release may duplicate the batch, so inspect the pane before retrying. Closed/replaced panes do not automatically deliver old queues; leftover files remain until state cleanup. Successful release clears the saved bodies. If you uninstall, remove the prefix binding only if it is still xcontrol's: `tmux list-keys -T prefix M-m`, then `tmux unbind-key -T prefix M-m`.
 
 The local guard stores at most 128 recent SHA-256 message hashes and timestamps per route in private files under the xcontrol state directory, without message bodies. Old entries expire on the next send; files remain until removed. Failed terminal delivery does not count as a successful send. This guard is a convenience, not an authentication boundary or an exactly-once delivery guarantee.
 
