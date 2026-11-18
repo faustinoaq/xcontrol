@@ -694,6 +694,19 @@ For auto agents this setting applies only if Codex is selected.
     return target
 
 
+class HelpParser(argparse.ArgumentParser):
+    def format_help(self):
+        logo = r"""       /\     /\
+  |__ /  '---'  \ __|
+     / .-------. \
+     | |  | |  | |
+  ___| '-------' |___
+ |   '-----------'   |
+         |   |
+"""
+        return logo + '\n  xcontrol\n\n' + super().format_help()
+
+
 def main():
     if len(sys.argv) == 5 and sys.argv[1] == '--watch-worker':
         return watch_worker(*sys.argv[2:])
@@ -701,7 +714,7 @@ def main():
         return pane(*sys.argv[2:])
     if len(sys.argv) in (4, 5) and sys.argv[1] == '--pane':
         return pane(*sys.argv[2:])
-    parser = argparse.ArgumentParser(description=__doc__, epilog='Examples: xc myapp.agents | xc status myapp.agents | xc send myapp.agents ios "Review the shared API"')
+    parser = HelpParser(description=__doc__, epilog='Examples: xc myapp.agents | xc status myapp.agents | xc send myapp.agents ios "Review the shared API"')
     parser.add_argument('action_or_file', nargs='?', help='directory, project.agents, list, check, availability, status, send, switch, watch, or stop')
     parser.add_argument('rest', nargs='*')
     parser.add_argument('--check', action='store_true', help='test model access with xc list (uses provider allowance)')
