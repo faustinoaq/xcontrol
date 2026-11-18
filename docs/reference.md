@@ -159,9 +159,15 @@ xc send "$XCONTROL_CONFIG" server "Can you confirm the API contract for Android 
 
 `XCONTROL_CONFIG`, `XCONTROL_AGENT`, and `XCONTROL_SESSION` are available inside each managed agent. IDs stay stable even when tmux pane numbers change. Messages use bracketed paste and submit to the target CLI; dead panes and ordinary shells reject messages. This is local terminal coordination, not a message queue: an agent that is busy or displaying a dialog may need manual attention. Send only when the recipient is ready. Avoid automatic reply loops and do not treat a peer message as approval for external actions. The tool cannot protect against another process that replaces the CLI in its pane.
 
+`xc send` makes no model calls, but delivering text can trigger the recipient's model. Exact duplicate messages from the same sender to the same pane are suppressed for five minutes, even if other messages were sent in between. It reports that the message was skipped and does not paste it. `xc send myapp.agents ios "message" --force` deliberately resends. Different messages and different senders remain independent; the guard resets for reopened groups and provider handoffs. It does not semantically summarize or truncate messages, enforce a token budget, or prevent every conversation loop.
+
+The local guard stores at most 128 recent SHA-256 message hashes and timestamps per route in private files under the xcontrol state directory, without message bodies. Old entries expire on the next send; files remain until removed. Failed terminal delivery does not count as a successful send. This guard is a convenience, not an authentication boundary or an exactly-once delivery guarantee.
+
+To reduce model usage, send only a short concrete question, blocker, decision or final result. Batch related questions, reference files rather than pasting long content, and avoid acknowledgment-only replies and status polling. Silence is appropriate when there is no new actionable information. Setup and handoff prompts include this guidance; existing native conversations may need the same instruction from you.
+
 A useful initial prompt:
 
-> Read project instructions, summarize your role and pending work, and list peers using `xc status "$XCONTROL_CONFIG"`. Coordinate with peers through `xc send` when useful. Initial inspection only; no builds, edits, pushes, deployments, or publication.
+> Read project instructions, summarize your role and pending work, and list peers using `xc status "$XCONTROL_CONFIG"`. Use `xc send` only for concise questions, blockers, decisions or results; no acknowledgment-only replies or repeated status requests. Initial inspection only; no builds, edits, pushes, deployments, or publication.
 
 ## Skill example
 

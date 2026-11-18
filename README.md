@@ -97,6 +97,8 @@ xc send "$XCONTROL_CONFIG" ios "Does this API change work for you?"
 
 Messages go straight into the other agent's terminal. There is no queue, so a busy agent or an open dialog may need your attention.
 
+Keep messages short: ask a concrete question or send a blocker, decision, or result. Batch questions and share file paths instead of long transcripts. Skip acknowledgments and repeated status requests. Identical messages from the same sender to the same pane are skipped for five minutes; use `--force` only when you need to resend.
+
 ## Pick an available agent
 
 Replace an agent's CLI choice with:

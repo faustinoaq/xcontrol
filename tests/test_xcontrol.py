@@ -97,6 +97,39 @@ class LauncherTest(unittest.TestCase):
         self.wait(lambda:any(e.get('message')==text for e in self.events()))
         self.cli('send',self.config,'unknown','hello',ok=False)
 
+    def test_duplicate_messages_expire_and_allow_explicit_resend(self):
+        self.start()
+        message='Review the shared API; report actionable findings only.'
+        self.cli('send',self.config,'ios',message)
+        self.wait(lambda:any(e.get('message')==message for e in self.events()))
+        self.assertIn('Duplicate message skipped',self.cli('send',self.config,'ios',message).stdout)
+        self.cli('send',self.config,'ios','Another concrete question')
+        self.cli('send',self.config,'ios',message,'--force')
+        self.wait(lambda:sum(e.get('message')==message for e in self.events())==2)
+        cache=list((self.root/'state/xcontrol').glob('send-*.json'))
+        self.assertEqual(len(cache),1)
+        self.assertNotIn(message,cache[0].read_text())
+        self.assertEqual(cache[0].stat().st_mode & 0o777,0o600)
+        stored=json.loads(cache[0].read_text())
+        cache[0].write_text(json.dumps({key:time.time()-301 for key in stored}))
+        self.cli('send',self.config,'ios',message)
+        self.wait(lambda:sum(e.get('message')==message for e in self.events())==3)
+        self.cli('switch',self.config,'ios','copilot')
+        self.wait(lambda:len([e for e in self.events() if e.get('id')=='ios'])==2)
+        self.cli('send',self.config,'ios',message)
+        self.wait(lambda:sum(e.get('message')==message for e in self.events())==4)
+
+    def test_concurrent_duplicate_sends_deliver_only_once(self):
+        self.start()
+        message='One request, even when sent concurrently.'
+        commands=[subprocess.Popen([str(CLI),'send',str(self.config),'ios',message],env=self.env,
+                    stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True) for _ in range(3)]
+        results=[(proc.communicate(timeout=10),proc.returncode) for proc in commands]
+        self.assertTrue(all(code==0 for _,code in results),results)
+        self.assertEqual(sum('Duplicate message skipped' in stdout for (stdout,_),_ in results),2)
+        self.wait(lambda:any(e.get('message')==message for e in self.events()))
+        self.assertEqual(sum(e.get('message')==message for e in self.events()),1)
+
     def test_agent_and_shell_panes_follow_tmux_exit_setting(self):
         self.start()
         def tmux(*args):
