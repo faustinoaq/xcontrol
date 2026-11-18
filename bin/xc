@@ -211,10 +211,20 @@ def model_availability(engine, timeout=30):
     return 'unavailable'
 
 
-def availability(engine, checks, cwd):
+def status_text(state, stream):
+    if not stream.isatty() or 'NO_COLOR' in os.environ or os.environ.get('TERM') == 'dumb':
+        return state
+    color = '32' if state in ('available', 'installed') else ('31' if state in ('unavailable', 'not installed', 'limited') else '33')
+    return f'\033[{color}m{state}\033[0m'
+
+
+def availability(engine, checks, cwd, progress=True):
     if not shutil.which(engine):
         return 'not installed'
-    print(f'Probando {LABELS.get(engine, engine)} ({engine})...', file=sys.stderr, flush=True)
+    interactive = progress and sys.stderr.isatty()
+    if progress:
+        print(f'Probando {LABELS.get(engine, engine)} ({engine})...', file=sys.stderr,
+              end='' if interactive else '\n', flush=True)
     try:
         if engine in checks:
             # Suppress checker output: it may contain account details or credentials.
@@ -225,6 +235,9 @@ def availability(engine, checks, cwd):
         return model_availability(engine)
     except (OSError, subprocess.TimeoutExpired):
         pass
+    finally:
+        if interactive:
+            print('\r\033[2K', end='', file=sys.stderr, flush=True)
     return 'unknown'
 
 
@@ -237,7 +250,7 @@ def resolve_agents(agents, path):
                 if candidate not in cache:
                     cache[candidate] = availability(candidate, agent['checks'], path.parent)
                 state = cache[candidate]
-                print(f"{agent['id']}: {candidate}: {state}", file=sys.stderr)
+                print(f"{agent['id']}: {candidate}: {status_text(state, sys.stderr)}", file=sys.stderr)
                 if state == 'available':
                     chosen['agent'] = candidate
                     if candidate not in BUILTINS:
@@ -407,7 +420,7 @@ def switch(path, session, agents, ident, engine='auto', note='', excluded=(), ca
                 state = availability(candidate, agent['checks'], path.parent)
                 if cache is not None:
                     cache[candidate] = state
-            print(f'{ident}: {candidate}: {state}', file=sys.stderr)
+            print(f'{ident}: {candidate}: {status_text(state, sys.stderr)}', file=sys.stderr)
             if state == 'available':
                 engine = candidate
                 break
@@ -666,9 +679,18 @@ def main():
         name_width = max(map(len, HANDOFF_ENGINES))
         label_width = max(len(LABELS.get(engine, engine)) for engine in HANDOFF_ENGINES)
         for engine in HANDOFF_ENGINES:
-            installed = shutil.which(engine)
-            state = availability(engine, {}, Path.cwd()) if args.check else ('installed' if installed else 'not installed')
-            print(f'{engine:<{name_width}}  {LABELS.get(engine, engine):<{label_width}}  {state}', flush=True)
+            if not shutil.which(engine):
+                continue
+            prefix = f'{engine:<{name_width}}  {LABELS.get(engine, engine):<{label_width}}  '
+            interactive = args.check and sys.stdout.isatty()
+            if interactive:
+                print(prefix + 'Probando...', end='', flush=True)
+            try:
+                state = availability(engine, {}, Path.cwd(), progress=not interactive) if args.check else 'installed'
+            finally:
+                if interactive:
+                    print('\r\033[2K', end='', flush=True)
+            print(prefix + status_text(state, sys.stdout), flush=True)
         return 0
     if args.check:
         parser.error('--check applies only to xc list.')
@@ -708,7 +730,7 @@ def main():
             for engine in agent['candidates'] if agent['agent'] == 'auto' else [agent['agent']]:
                 if engine not in cache:
                     cache[engine] = availability(engine, agent['checks'], path.parent)
-                    print(f'{engine}\t{cache[engine]}')
+                    print(f'{engine}\t{status_text(cache[engine], sys.stdout)}')
         return 0
     if not shutil.which('tmux'):
         raise ValueError('Missing dependency: tmux.')

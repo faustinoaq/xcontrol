@@ -115,7 +115,7 @@ One watcher runs per config, protected by an OS lock. Background logs are privat
 
 ## Installed tools and custom CLIs
 
-`xc list` lists the eight supported executable names and whether they are on PATH. It makes no model calls and does not equate installation with access. `xc list --check` tests each installed supported CLI, printing progress before each call. No account identifiers or raw provider errors are printed. It does not scan or execute arbitrary programs on PATH.
+`xc list` shows only supported CLIs installed on PATH. It makes no model calls and does not equate installation with access. `xc list --check` tests each installed supported CLI, replacing `Probando...` with the final state on terminals. Installed/available states are green; unavailable/limited states are red. Redirected output stays plain text; `NO_COLOR` disables colors. No account identifiers or raw provider errors are printed. It does not scan or execute arbitrary programs on PATH.
 
 Any other interactive CLI, including Kimi, Muse, OpenCode or Aider, can run using `agent = "<executable>"` and literal `args`. These are not installed or probed automatically. Use their documented session flags in `args`; custom CLIs default to `resume = "new"`. They can participate in initial auto selection through trusted `[availability]` checkers. Built-in handoff and quota watching require a supported adapter; a generic CLI is not enough to safely guess prompt and error formats.
 
