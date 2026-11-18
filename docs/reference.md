@@ -107,7 +107,7 @@ xc watch myapp.agents --detach    # background
 xc watch myapp.agents --stop      # disable; leave agents running
 ```
 
-This is a local Python supervisor, not an extra model agent. It checks live pane screens about every 30 seconds without model calls. It requires a recognizable quota notice in the last 12 screen lines and an unchanged screen for at least 60 seconds. It then probes that same provider separately. Only an explicit quota failure permits a handoff; authentication errors, timeouts, generic HTTP 429 errors, context limits and unknown failures do not. If the screen changes during confirmation, it does not switch. This is best-effort terminal detection, not a guaranteed provider event API; unrecognized notices need manual switching. A stable screen cannot prove there are no background tasks. Enable only when automatic interruption on a confirmed quota failure is appropriate.
+Start this explicitly after opening the project group. Setting `agent = "auto"` only selects a provider at launch; it never starts quota watching. This is a local Python supervisor, not an extra model agent. It checks live pane screens about every 30 seconds without model calls. It requires a recognizable quota notice in the last 12 screen lines and an unchanged screen for at least 60 seconds. It then probes that same provider separately. Only an explicit quota failure permits a handoff; authentication errors, timeouts, generic HTTP 429 errors, context limits and unknown failures do not. If the screen changes during confirmation, it does not switch. This is best-effort terminal detection, not a guaranteed provider event API; unrecognized notices need manual switching. A stable screen cannot prove there are no background tasks. Enable only when automatic interruption on a confirmed quota failure is appropriate.
 
 The next provider comes from that role's candidates, using normal access probes and the existing handoff snapshot. A watched role never returns to a provider already confirmed exhausted during that watch run. Once alternatives run out, it stays in place. Failed confirmation or replacement is retried no more than once every five minutes per pane/provider. Stopping and restarting the watcher clears its exhausted-provider memory. The normal model checks still use the CLI's own model and billing settings, so watching does not guarantee free usage.
 
@@ -153,6 +153,24 @@ Reattaching does not resend the policy. Changing the flag does not rewrite promp
 Any other interactive CLI, including Kimi, Muse, OpenCode or Aider, can run using `agent = "<executable>"` and literal `args`. These are not installed or probed automatically. Use their documented session flags in `args`; custom CLIs default to `resume = "new"`. They can participate in initial auto selection through trusted `[availability]` checkers. Built-in handoff and quota watching require a supported adapter; a generic CLI is not enough to safely guess prompt and error formats.
 
 Codex, Copilot and Claude retain built-in resume handling. The other supported CLIs start fresh unless their documented native resume arguments are supplied. Kiro launches as `kiro-cli chat`. Provider configuration and authentication remain the user's responsibility. Free/paid access is determined by the provider and account, not by xcontrol.
+
+## Local files
+
+Persistent xcontrol state lives in `$XDG_STATE_HOME/xcontrol`, defaulting to `~/.local/state/xcontrol`. The state directory has mode 700. It is not cleared by `xc stop`.
+
+| Location | Contents and lifetime |
+| --- | --- |
+| `quickstart/<hash>/project.agents` | Setup configuration for `xc .` or `xc <directory>`. Retained for reattachment and reuse. |
+| `handoffs/<role>-*.md` | Recent terminal history, Git state, notes and previous handoff paths. Retained until you remove them; files have mode 600 and can contain private output. |
+| `send-*.json` | Up to 128 message hashes and timestamps per route, without message bodies. Entries expire after five minutes and are pruned on the next send; the file remains. Mode 600. |
+| `watch-*.log` | Appended background quota-watcher logs. Retained until removed; mode 600. |
+| `*.lock` | Coordination and CLI/folder locks. Files may remain after exit; the OS releases the actual locks when their owning processes exit. Do not remove them while groups or watchers are running. |
+
+Model checks use Python's system temporary directory (`TMPDIR` when configured, commonly `/tmp`): `xc-probe-*` workspaces, a temporary tools-disabled Kiro profile when needed, and temporary captured stdout/stderr. Normal completion and handled failures clean them up. Interrupted processes can leave temporary workspaces or atomic-write staging files behind. No model answers are deliberately retained by xcontrol after the probe.
+
+`xc send` also creates a temporary tmux paste buffer and deletes it after submission. tmux owns its server sockets, and each provider owns its native conversations, logs and caches; those are separate from xcontrol state. Removing a temporary workspace does not erase a provider's own records. xcontrol reads Codex's session database in read-only mode to find a session; it does not create a conversation database of its own. Project `.agents` files are user configuration, not disposable state.
+
+See [Uninstall](../README.md#uninstall) to remove the installer's links and optionally erase xcontrol state after stopping its groups. Removing the state also removes quickstart configuration used to identify directory-based setup groups, so stop those groups before cleanup.
 
 ## Commands
 

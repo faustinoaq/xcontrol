@@ -20,6 +20,36 @@ cd xcontrol
 
 Keep `~/.local/bin` on your PATH. The installer links to this checkout, so keep it around.
 
+## Local files
+
+xcontrol keeps setup configs, handoff snapshots, message hashes, watcher logs, and lock files in `$XDG_STATE_HOME/xcontrol` (default: `~/.local/state/xcontrol`). Handoff snapshots can contain private terminal output. Access checks use temporary `xc-probe-*` folders, removed on normal completion. Agent CLIs keep their own history and caches separately. See [file details](docs/reference.md#local-files).
+
+## Uninstall
+
+Stop each running group from another terminal first:
+
+```sh
+xc stop /path/to/myapp.agents
+```
+
+For a setup group opened with `xc .`, use `xc stop /path/to/project`.
+
+Remove the links created by `install.sh`:
+
+```sh
+unlink "$HOME/.local/bin/xc"
+unlink "$HOME/.local/bin/xcontrol"
+unlink "${CODEX_HOME:-$HOME/.codex}/skills/xcontrol"
+```
+
+Optionally delete xcontrol's saved state, including handoff snapshots:
+
+```sh
+rm -rf -- "${XDG_STATE_HOME:-$HOME/.local/state}/xcontrol"
+```
+
+Use the same environment settings you used when installing and running xcontrol. You can then remove the cloned checkout and any shell aliases you added. Your project `.agents` files and the agent CLIs' conversations remain.
+
 ## Get started
 
 Already have a config? Open it:
@@ -135,6 +165,8 @@ Switch when the old agent is idle or blocked: it is replaced. This starts a fres
 xc watch myapp.agents --detach   # enable quota watching in the background
 xc watch myapp.agents --stop     # disable it; agents keep running
 ```
+
+Start the watcher yourself after opening the group; `agent = "auto"` does not start it. It runs as a local background Python process, not another AI agent.
 
 The watcher uses no model while waiting. A quota notice must stay unchanged for a minute, then a small model call must also confirm the limit. It passes context to the next available CLI and avoids looping through exhausted providers. Detection depends on each CLI's error messages, so manual switching remains available. It stops with the project group; enable it again after reopening.
 
