@@ -23,8 +23,10 @@ STATE = Path(os.environ.get('XDG_STATE_HOME', str(Path.home() / '.local/state'))
 BUILTINS = ('codex', 'copilot', 'claude')
 HANDOFF_ENGINES = (*BUILTINS, 'agy', 'devin', 'kiro-cli', 'agent', 'grok')
 DEFAULT_CANDIDATES = HANDOFF_ENGINES
-# Display names differ from executable names for these two providers.
-LABELS = {'agent': 'Cursor', 'kiro-cli': 'Kiro'}
+# Human-readable provider names, independent of executable names.
+LABELS = {'codex': 'Codex', 'copilot': 'Copilot', 'claude': 'Claude',
+          'agy': 'Antigravity', 'devin': 'Devin', 'kiro-cli': 'Kiro',
+          'agent': 'Cursor', 'grok': 'Grok'}
 
 
 def executable(value):
@@ -676,8 +678,9 @@ def main():
     if action == 'list':
         if args.rest or args.auto or args.stop or args.note or args.kill or args.detach:
             parser.error('Use xc list [--check].')
-        name_width = max(map(len, HANDOFF_ENGINES))
-        label_width = max(len(LABELS.get(engine, engine)) for engine in HANDOFF_ENGINES)
+        name_width = max(len('Command'), max(map(len, HANDOFF_ENGINES)))
+        label_width = max(len('Provider'), max(len(LABELS.get(engine, engine)) for engine in HANDOFF_ENGINES))
+        print(f'{"Command":<{name_width}}  {"Provider":<{label_width}}  Status', flush=True)
         for engine in HANDOFF_ENGINES:
             if not shutil.which(engine):
                 continue
