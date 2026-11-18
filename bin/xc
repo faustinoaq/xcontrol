@@ -21,7 +21,10 @@ import uuid
 SCRIPT = Path(__file__).resolve()
 STATE = Path(os.environ.get('XDG_STATE_HOME', str(Path.home() / '.local/state'))) / 'xcontrol'
 BUILTINS = ('codex', 'copilot', 'claude')
-HANDOFF_ENGINES = (*BUILTINS, 'agy', 'devin')
+HANDOFF_ENGINES = (*BUILTINS, 'agy', 'devin', 'kiro-cli', 'agent', 'grok')
+DEFAULT_CANDIDATES = HANDOFF_ENGINES
+# Display names differ from executable names for these two providers.
+LABELS = {'agent': 'Cursor', 'kiro-cli': 'Kiro'}
 
 
 def executable(value):
@@ -72,7 +75,7 @@ def load(filename):
         extra_args = agent.get('args', [])
         if not argv(extra_args):
             raise ValueError('args must be a list of strings without NUL bytes.')
-        candidates = agent.get('candidates', list(BUILTINS))
+        candidates = agent.get('candidates', list(DEFAULT_CANDIDATES))
         if engine == 'auto':
             if not isinstance(candidates, list) or not candidates or any(not executable(c) for c in candidates) or len(set(candidates)) != len(candidates):
                 raise ValueError('candidates must be a nonempty list of unique CLI names.')
@@ -101,8 +104,8 @@ def load(filename):
             prompt = agent['prompt']
             if not isinstance(prompt, str) or not prompt.strip() or len(prompt.encode()) > 65536:
                 raise ValueError('prompt must be nonempty text of at most 64 KiB.')
-            if resume != 'new' or (engine not in BUILTINS and engine != 'auto') or (engine == 'auto' and any(c not in BUILTINS for c in candidates)):
-                raise ValueError('Initial prompts require resume = new and Codex, Copilot, or Claude candidates.')
+            if resume != 'new' or (engine not in HANDOFF_ENGINES and engine != 'auto') or (engine == 'auto' and any(c not in HANDOFF_ENGINES for c in candidates)):
+                raise ValueError('Initial prompts require resume = new and supported CLI candidates.')
         if not isinstance(agent.get('role', ''), str):
             raise ValueError('role must be text.')
         agent.update(agent=engine, folder=str(cwd), resume=resume, args=extra_args,
@@ -122,6 +125,14 @@ def probe_command(engine):
         'copilot': ['copilot', '-p', prompt, '--silent', '--available-tools=',
                     '--disable-builtin-mcps', '--no-custom-instructions'],
     }
+    commands.update({
+        'agy': ['agy', '-p', prompt, '--sandbox', '--disable-slash-commands'],
+        'devin': ['devin', '--process-model', 'in-process', '--permission-mode', 'auto',
+                  '--respect-workspace-trust', 'false', '-p', prompt],
+        'kiro-cli': ['kiro-cli', 'chat', '--v3', '--no-interactive', '--trust-workspace', '--trust-tools=', '--agent', 'xc-probe', prompt],
+        'agent': ['agent', '-p', '--mode', 'ask', '--trust', '--sandbox', 'enabled', prompt],
+        'grok': ['grok', '-p', prompt, '--tools', '', '--no-subagents', '--disable-web-search'],
+    })
     return commands.get(engine)
 
 
@@ -140,9 +151,26 @@ def probe_success(engine, output):
                             and e.get('item', {}).get('type') == 'agent_message'
                             and e['item'].get('text', '').strip() == 'XCONTROL_OK'
                             for e in events))
-        return output.strip() == 'XCONTROL_OK'
+        clean = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', output).strip()
+        if engine == 'kiro-cli':
+            # Kiro adds a response prefix and login/usage banners in text mode.
+            return any(line.strip().removeprefix('>').strip() == 'XCONTROL_OK'
+                       for line in clean.splitlines())
+        return clean == 'XCONTROL_OK'
     except (ValueError, TypeError, AttributeError):
         return False
+
+
+def quota_error(output):
+    # Authentication, network errors, HTTP 429, and tokens/context size alone do
+    # not prove the account's usage allowance is exhausted.
+    return bool(re.search(
+        r"(?:you(?:'ve| have)? (?:hit|reached|exceeded) (?:your |the )?(?:(?:daily|weekly|monthly|usage|premium|request|credit|free|plan) )*limit"
+        r"|(?:usage|weekly|monthly|daily|credit|premium request|free tier) (?:limit|quota|allowance|credits?)(?: has been| is|:)? (?:reached|exceeded|exhausted|depleted)"
+        r"|(?:insufficient_quota|usage_limit_reached|quota_exceeded)"
+        r"|(?:no|not enough|insufficient) (?:remaining )?(?:credits|premium requests)"
+        r"|(?:out of|used all (?:of )?(?:your )?) (?:credits|premium requests))",
+        output, re.I))
 
 
 def model_availability(engine, timeout=30):
@@ -151,11 +179,17 @@ def model_availability(engine, timeout=30):
         return 'unknown'
     # Keep project instructions and probe conversations out of real workspaces.
     with tempfile.TemporaryDirectory(prefix='xc-probe-') as cwd:
+        if engine == 'kiro-cli':
+            profile = Path(cwd) / '.kiro/agents/xc-probe.json'
+            profile.parent.mkdir(parents=True)
+            profile.write_text(json.dumps({'name': 'xc-probe', 'description': 'Access check',
+                'tools': [], 'mcpServers': {}, 'resources': [], 'hooks': {},
+                'includeMcpJson': False, 'includePowers': False}))
         for attempt in range(2):
-            with tempfile.TemporaryFile() as output:
+            with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
                 try:
                     with subprocess.Popen(command, cwd=cwd, stdin=subprocess.DEVNULL,
-                                          stdout=output, stderr=subprocess.DEVNULL,
+                                          stdout=output, stderr=errors,
                                           start_new_session=True) as proc:
                         try:
                             code = proc.wait(timeout=timeout)
@@ -167,6 +201,10 @@ def model_availability(engine, timeout=30):
                         answer = output.read(1048577)
                         if code == 0 and len(answer) <= 1048576 and probe_success(engine, answer.decode('utf-8', errors='replace')):
                             return 'available'
+                        errors.seek(0)
+                        failure = answer.decode('utf-8', errors='replace') + errors.read(1048576).decode('utf-8', errors='replace')
+                        if quota_error(failure):
+                            return 'limited'
                 except OSError:
                     pass
     # Failure means unusable for this launch, not permanent account exhaustion.
@@ -176,6 +214,7 @@ def model_availability(engine, timeout=30):
 def availability(engine, checks, cwd):
     if not shutil.which(engine):
         return 'not installed'
+    print(f'Probando {LABELS.get(engine, engine)} ({engine})...', file=sys.stderr, flush=True)
     try:
         if engine in checks:
             # Suppress checker output: it may contain account details or credentials.
@@ -237,6 +276,8 @@ def command(agent):
         extra += (['-i', agent['prompt']] if engine == 'copilot' else [agent['prompt']])
     if engine == 'devin' and agent.get('prompt'):
         return ['devin', '--process-model', 'in-process', *agent.get('args', []), '--', agent['prompt']]
+    if engine == 'kiro-cli':
+        return ['kiro-cli', 'chat', *agent.get('args', []), *([agent['prompt']] if agent.get('prompt') else [])]
     if engine == 'agy' and agent.get('prompt'):
         return ['agy', *agent.get('args', []), '--prompt-interactive', agent['prompt']]
     if engine not in ('codex', 'claude', 'copilot'):
@@ -341,7 +382,7 @@ def pane(filename, ident, selected=None, handoff=None):
         return subprocess.call(command(agent))
 
 
-def switch(path, session, agents, ident, engine='auto', note=''):
+def switch(path, session, agents, ident, engine='auto', note='', excluded=(), cache=None, can_replace=None):
     """Replace one terminal with another CLI, carrying a private local snapshot."""
     agent = next((a for a in agents if a['id'] == ident), None)
     matches = [p for p in peers(session) if p[0] == ident]
@@ -353,10 +394,19 @@ def switch(path, session, agents, ident, engine='auto', note=''):
         raise ValueError('Run xc switch from another pane or terminal, not the pane being replaced.')
     previous = tmux('show-options', '-pqv', '-t', target, '@xcontrol_engine')
     if engine == 'auto':
-        for candidate in agent['candidates']:
-            if candidate == previous or candidate not in HANDOFF_ENGINES:
+        candidates = agent['candidates']
+        if previous in candidates:
+            index = candidates.index(previous) + 1
+            candidates = candidates[index:] + candidates[:index]
+        for candidate in candidates:
+            if candidate == previous or candidate in excluded or candidate not in HANDOFF_ENGINES:
                 continue
-            state = availability(candidate, agent['checks'], path.parent)
+            if cache is not None and candidate in cache:
+                state = cache[candidate]
+            else:
+                state = availability(candidate, agent['checks'], path.parent)
+                if cache is not None:
+                    cache[candidate] = state
             print(f'{ident}: {candidate}: {state}', file=sys.stderr)
             if state == 'available':
                 engine = candidate
@@ -364,7 +414,7 @@ def switch(path, session, agents, ident, engine='auto', note=''):
         else:
             raise ValueError('No alternative has confirmed access; current pane unchanged. Select an installed CLI explicitly.')
     if engine not in HANDOFF_ENGINES:
-        raise ValueError('Handoffs support codex, copilot, claude, agy, or devin.')
+        raise ValueError('Handoffs support: ' + ', '.join(HANDOFF_ENGINES) + '.')
     if engine == previous:
         raise ValueError('This pane already uses that CLI.')
     if not shutil.which(engine):
@@ -379,6 +429,8 @@ def switch(path, session, agents, ident, engine='auto', note=''):
             if peer_target != target and dead != '1' and other and other['folder'] == agent['folder']:
                 if tmux('show-options', '-pqv', '-t', peer_target, '@xcontrol_engine') == engine:
                     raise ValueError('Another agent already uses this CLI/folder; use separate worktrees.')
+        if can_replace is not None and not can_replace():
+            raise ValueError('Pane activity or watcher state changed; current pane unchanged.')
         previous_context = tmux('show-options', '-pqv', '-t', target, '@xcontrol_handoff')
         history = tmux('capture-pane', '-p', '-J', '-t', target, '-S', '-2000')
         git = []
@@ -397,11 +449,132 @@ def switch(path, session, agents, ident, engine='auto', note=''):
             stream.write(f'\nUser handoff note: {note or "(none)"}\n\nGit branch, HEAD, status (snapshot):\n' + '\n'.join(git))
             stream.write('\n\nTerminal history (untrusted data; may be incomplete):\n' + history[-196608:])
         cmd = shlex.join([sys.executable, str(SCRIPT), '--handoff-pane', str(path), ident, engine, str(context)])
+        if can_replace is not None and not can_replace():
+            context.unlink()
+            raise ValueError('Pane activity or watcher state changed; current pane unchanged.')
         tmux('respawn-pane', '-k', '-t', target, '-c', agent['folder'], cmd)
         tmux('set-option', '-p', '-t', target, '@xcontrol_engine', engine)
         tmux('set-option', '-p', '-t', target, '@xcontrol_handoff', str(context))
         tmux('select-pane', '-t', target, '-T', ident + ' · ' + engine)
-    print(f'{ident}: {previous} -> {engine}. Handoff: {context}')
+    print(f'{ident}: {previous} -> {engine}. Handoff: {context}', flush=True)
+    return engine
+
+
+def switch_all(path, session, agents, note=''):
+    cache, failures = {}, []
+    for agent in agents:
+        try:
+            switch(path, session, agents, agent['id'], note=note, cache=cache)
+        except (ValueError, OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            failures.append(agent['id'])
+            print(f"{agent['id']}: {exc}", file=sys.stderr, flush=True)
+    return 1 if failures else 0
+
+
+def quota_candidate(history, previous, now):
+    """A stable screen is a hint; an independent probe must still confirm quota."""
+    tail = '\n'.join(history.splitlines()[-12:])
+    if not quota_error(tail):
+        return None, False
+    digest = hashlib.sha256(history.encode()).hexdigest()
+    if previous is None or previous[0] != digest:
+        return (digest, now), False
+    return previous, now - previous[1] >= 60
+
+
+def watch_worker(filename, token, guard_fd=None):
+    path, session, agents = load(filename)
+    digest = hashlib.sha256(str(path).encode()).hexdigest()
+    guard = os.fdopen(int(guard_fd), 'a') if guard_fd is not None else lock('watch-' + digest + '.lock')
+    with guard:
+        observations, cooldown, tried = {}, {}, {}
+        def enabled():
+            return (managed(path, session) and
+                    tmux('show-options', '-qv', '-t', session, '@xcontrol_watch') == token)
+        try:
+            while enabled():
+                for ident, target, process, dead in peers(session):
+                    if dead == '1' or process in ('bash', 'sh', 'zsh', 'fish'):
+                        continue
+                    engine = tmux('show-options', '-pqv', '-t', target, '@xcontrol_engine')
+                    if engine not in HANDOFF_ENGINES:
+                        continue
+                    now = time.monotonic()
+                    key = (ident, target, engine)
+                    history = tmux('capture-pane', '-p', '-J', '-t', target)
+                    observations[key], ready = quota_candidate(history, observations.get(key), now)
+                    if not ready or now < cooldown.get(key, 0):
+                        continue
+                    cooldown[key] = now + 300
+                    # Custom checkers report access, not why it failed. Never
+                    # infer exhaustion from a network failure or a generic 429.
+                    print(f'Probando {LABELS.get(engine, engine)} ({engine}) para confirmar límite...', flush=True)
+                    if model_availability(engine) != 'limited' or not enabled():
+                        continue
+                    # Abort if the terminal changed while the probe ran.
+                    if tmux('capture-pane', '-p', '-J', '-t', target) != history:
+                        continue
+                    prior = tried.setdefault(ident, set())
+                    prior.add(engine)
+                    try:
+                        with lock('launcher.lock', blocking=True):
+                            if not enabled():
+                                break
+                            live_engine = tmux('show-options', '-pqv', '-t', target, '@xcontrol_engine')
+                            if live_engine != engine:
+                                continue
+                            def can_replace():
+                                return (enabled() and tmux('show-options', '-pqv', '-t', target, '@xcontrol_engine') == engine
+                                        and tmux('capture-pane', '-p', '-J', '-t', target) == history)
+                            switch(path, session, agents, ident, excluded=prior, can_replace=can_replace,
+                                   note='Automatic handoff after a stable quota notice and an independent quota failure. Verify unfinished work before continuing.')
+                    except (ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
+                        # Avoid logging provider output or terminal history.
+                        print(f'{ident}: no automatic replacement completed ({type(exc).__name__}); retry in five minutes.', flush=True)
+                for _ in range(6):
+                    time.sleep(5)
+                    if not enabled():
+                        return 0
+        finally:
+            if managed(path, session) and tmux('show-options', '-qv', '-t', session, '@xcontrol_watch') == token:
+                tmux('set-option', '-t', session, '@xcontrol_watch', '')
+    return 0
+
+
+def watch(path, session, stop=False, detached=False):
+    if stop:
+        # Cancel even while a worker is probing alternatives under launcher.lock.
+        tmux('set-option', '-t', session, '@xcontrol_watch', '')
+        print('Automatic switching disabled. Agents keep running.')
+        return 0
+    with lock('launcher.lock', blocking=True):
+        digest = hashlib.sha256(str(path).encode()).hexdigest()
+        # A dead worker may leave its token behind. The OS lock is authoritative.
+        try:
+            guard = lock('watch-' + digest + '.lock')
+        except ValueError:
+            print('Automatic switching is already running (or stopping).')
+            return 0
+        token = uuid.uuid4().hex
+        tmux('set-option', '-t', session, '@xcontrol_watch', token)
+        if detached:
+            logfile = STATE / ('watch-' + digest + '.log')
+            fd = os.open(logfile, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, 'a') as stream:
+                subprocess.Popen([sys.executable, str(SCRIPT), '--watch-worker', str(path), token, str(guard.fileno())],
+                                 pass_fds=(guard.fileno(),), stdin=subprocess.DEVNULL, stdout=stream, stderr=stream,
+                                 start_new_session=True)
+            guard.close()
+            print(f'Automatic switching enabled. Log: {logfile}')
+            return 0
+    print('Watching for confirmed usage limits. Ctrl+C stops watching; agents keep running.', flush=True)
+    try:
+        return watch_worker(str(path), token, os.dup(guard.fileno()))
+    except KeyboardInterrupt:
+        return 0
+    finally:
+        guard.close()
 
 
 def directory_config(directory, action):
@@ -414,7 +587,8 @@ def directory_config(directory, action):
         return target
     prompt = """Help me set up xcontrol for this project. First read project instructions and inspect
 this directory and its immediate child folders, read-only. Check which of codex,
-copilot, and claude are installed using command -v. Other CLI agents can also be
+copilot, claude, agy, devin, kiro-cli, agent (Cursor), and grok are installed
+using xc list. Other CLI agents can also be
 configured explicitly, with their documented args; do not guess availability.
 Suggest a small team with useful roles and separate folders/worktrees when the
 same CLI would work in the same repository. Ask me to confirm the folders and
@@ -436,7 +610,7 @@ role = "Server APIs; coordinate with android."
 
 Resolve relative folders from the configuration file location. Use only existing
 folders, or ask before creating worktrees. agent = "auto" optionally accepts
-candidates = ["codex", "copilot", "claude"] and tests access with small model
+candidates = ["codex", "copilot", "agy", "devin", "kiro-cli", "agent", "grok", "claude"] and tests access with small model
 calls. Run xc check on the proposed file once written. Explain how to launch it
 with xc <file>.agents. Agents can discover peers with xc status "$XCONTROL_CONFIG"
 and communicate with xc send "$XCONTROL_CONFIG" <agent-id> "message". Roles are
@@ -464,13 +638,18 @@ For auto agents this setting applies only if Codex is selected.
 
 
 def main():
+    if len(sys.argv) == 5 and sys.argv[1] == '--watch-worker':
+        return watch_worker(*sys.argv[2:])
     if len(sys.argv) == 6 and sys.argv[1] == '--handoff-pane':
         return pane(*sys.argv[2:])
     if len(sys.argv) in (4, 5) and sys.argv[1] == '--pane':
         return pane(*sys.argv[2:])
     parser = argparse.ArgumentParser(description=__doc__, epilog='Examples: xc myapp.agents | xc status myapp.agents | xc send myapp.agents ios "Review the shared API"')
-    parser.add_argument('action_or_file', nargs='?', help='directory, project.agents, check, availability, status, send, switch, or stop')
+    parser.add_argument('action_or_file', nargs='?', help='directory, project.agents, list, check, availability, status, send, switch, watch, or stop')
     parser.add_argument('rest', nargs='*')
+    parser.add_argument('--check', action='store_true', help='test model access with xc list (uses provider allowance)')
+    parser.add_argument('--auto', action='store_true', help='switch every configured pane to its next available CLI')
+    parser.add_argument('--stop', action='store_true', help='disable the optional quota watcher')
     parser.add_argument('--note', default='', help='context to add when switching a pane')
     parser.add_argument('--detach', action='store_true', help='start without attaching')
     parser.add_argument('-k', '--kill', action='store_true', help='close this project group')
@@ -481,7 +660,21 @@ def main():
         parser.print_help()
         return 0
     action = args.action_or_file
-    if action in ('check', 'availability', 'status', 'send', 'switch', 'stop'):
+    if action == 'list':
+        if args.rest or args.auto or args.stop or args.note or args.kill or args.detach:
+            parser.error('Use xc list [--check].')
+        for engine in HANDOFF_ENGINES:
+            installed = shutil.which(engine)
+            state = availability(engine, {}, Path.cwd()) if args.check else ('installed' if installed else 'not installed')
+            print(f'{engine}\t{LABELS.get(engine, engine)}\t{state}', flush=True)
+        return 0
+    if args.check:
+        parser.error('--check applies only to xc list.')
+    if args.auto and action != 'switch':
+        parser.error('--auto applies only to switch.')
+    if args.stop and action != 'watch':
+        parser.error('--stop applies only to watch.')
+    if action in ('check', 'availability', 'status', 'send', 'switch', 'watch', 'stop'):
         if not args.rest:
             parser.error('A .agents file is required.')
         filename, *extra = args.rest
@@ -491,14 +684,14 @@ def main():
         if len(extra) != 2:
             parser.error('Use xc send project.agents agent-id "message".')
     elif action == 'switch':
-        if len(extra) not in (1, 2):
-            parser.error('Use xc switch project.agents agent-id [codex|copilot|claude|agy|devin].')
+        if (args.auto and extra) or (not args.auto and len(extra) not in (1, 2)):
+            parser.error('Use xc switch project.agents agent-id [cli], or xc switch project.agents --auto.')
     elif extra:
         parser.error('Unexpected arguments.')
     if args.note and action != 'switch':
         parser.error('--note applies only to switch.')
     if Path(filename).expanduser().is_dir():
-        if action not in ('open', 'status', 'send', 'switch', 'stop'):
+        if action not in ('open', 'status', 'send', 'switch', 'watch', 'stop'):
             parser.error('Use an .agents file for check or availability.')
         if not shutil.which('tmux'):
             raise ValueError('Missing dependency: tmux.')
@@ -517,7 +710,7 @@ def main():
         return 0
     if not shutil.which('tmux'):
         raise ValueError('Missing dependency: tmux.')
-    if action in ('status', 'send', 'switch', 'stop'):
+    if action in ('status', 'send', 'switch', 'watch', 'stop'):
         if not managed(path, session):
             raise ValueError('Project group is not running.')
         if action == 'status':
@@ -528,7 +721,11 @@ def main():
             send(session, *extra)
         elif action == 'switch':
             with lock('launcher.lock', blocking=True):
+                if args.auto:
+                    return switch_all(path, session, agents, note=args.note)
                 switch(path, session, agents, *extra, note=args.note)
+        elif action == 'watch':
+            return watch(path, session, stop=args.stop, detached=args.detach)
         else:
             tmux('kill-session', '-t', '=' + session)
             print('Closed project group; saved CLI conversations remain.')

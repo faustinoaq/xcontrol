@@ -74,6 +74,8 @@ Codex, Copilot, and Claude resume conversations by default. Add `resume = "new"`
 
 ```sh
 xc myapp.agents                  # start or reattach
+xc list                         # installed supported CLIs
+xc list --check                 # test model access
 xc status myapp.agents           # see who's running
 xc send myapp.agents server "Please review the API changes"
 xc stop myapp.agents             # close the group
@@ -101,10 +103,12 @@ Replace an agent's CLI choice with:
 
 ```toml
 agent = "auto"
-candidates = ["codex", "copilot", "claude"]
+candidates = ["codex", "copilot", "agy", "devin", "kiro-cli", "agent", "grok", "claude"]
 ```
 
-xcontrol tries them in order with a small model call and picks the first that answers. These calls count toward usage and may cost money. Reattaching doesn't check again. To change a running pane, use `xc switch`.
+Supported CLIs: Codex, Claude, Copilot, Antigravity (`agy`), Devin, Kiro (`kiro-cli`), Cursor (`agent`), and Grok. Other CLIs can use custom commands. Install and sign in separately; xcontrol does not choose a pricing plan.
+
+xcontrol tries candidates in order with a small model call and picks the first that answers. These calls count toward usage and may cost money. Reattaching doesn't check again. To change a running pane, use `xc switch`.
 
 ## Hit a usage limit?
 
@@ -114,16 +118,24 @@ Switch just that pane from another terminal:
 xc switch myapp.agents server copilot
 xc switch myapp.agents server agy
 xc switch myapp.agents server devin
-xc switch myapp.agents server             # check for an available alternative
+xc switch myapp.agents server             # next available CLI for one pane
+xc switch myapp.agents --auto             # next available CLI for every pane
 ```
 
 The new CLI gets the role, recent terminal history, and Git state. Other panes keep running. Add `--note "what to continue"` if useful.
 
-Switch when the old agent is idle or blocked: it is replaced. This starts a fresh conversation, not a full history import. Selection without a CLI makes small access-check calls. Limits are not watched automatically.
+Switch when the old agent is idle or blocked: it is replaced. This starts a fresh conversation, not a full history import. Selection without a CLI makes small access-check calls. For optional automatic handoffs:
+
+```sh
+xc watch myapp.agents --detach   # enable quota watching in the background
+xc watch myapp.agents --stop     # disable it; agents keep running
+```
+
+The watcher uses no model while waiting. A quota notice must stay unchanged for a minute, then a small model call must also confirm the limit. It passes context to the next available CLI and avoids looping through exhausted providers. Detection depends on each CLI's error messages, so manual switching remains available. It stops with the project group; enable it again after reopening.
 
 ## Ask your agent to set it up
 
-The installer includes a [Codex skill](skills/xcontrol/SKILL.md). Try:
+The installer includes a [skill](skills/xcontrol/SKILL.md). Try:
 
 > Use xcontrol to create myapp.agents with myapp-android using Codex, myapp-ios using Copilot, and myapp-server using Claude.
 

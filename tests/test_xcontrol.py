@@ -24,7 +24,7 @@ class LauncherTest(unittest.TestCase):
         self.env = dict(os.environ, HOME=str(self.root), XDG_STATE_HOME=str(self.root/'state'), TMUX_TMPDIR=str(self.root), CODEX_HOME=str(self.root/'codex'), LOG=str(self.root/'events'))
         self.env.pop('TMUX', None)
         (self.root/'bin').mkdir()
-        for engine in ('codex', 'claude', 'copilot', 'devin', 'agy'):
+        for engine in xc.HANDOFF_ENGINES:
             script = self.root/'bin'/engine
             script.write_text('#!/usr/bin/env python3\nimport os,sys,json\nwith open(os.environ["LOG"],"a") as f:f.write(json.dumps({"id":os.environ["XCONTROL_AGENT"],"cwd":os.getcwd(),"args":sys.argv[1:],"config":os.environ["XCONTROL_CONFIG"]})+"\\n")\nfor line in sys.stdin:\n with open(os.environ["LOG"],"a") as f:f.write(json.dumps({"message":line.strip()})+"\\n")\n')
             script.chmod(0o755)
@@ -233,6 +233,51 @@ class LauncherTest(unittest.TestCase):
         self.assertEqual(len(snapshots), 3)
         self.assertEqual(sum('Previous handoff' in p.read_text() for p in snapshots), 2)
         self.assertIn('\tdevin', self.cli('status', self.config).stdout)
+
+    def test_switch_all_auto_and_extended_destinations(self):
+        self.config.write_text('availability={copilot=["python3","-c","raise SystemExit(0)"],agy=["python3","-c","raise SystemExit(0)"]}\n' + self.config.read_text())
+        self.start()
+        before = {r.split('\t')[0]:r.split('\t')[1] for r in self.cli('status',self.config).stdout.splitlines()}
+        self.cli('switch', self.config, '--auto')
+        self.wait(lambda:len(self.events())==4)
+        status = self.cli('status',self.config).stdout
+        self.assertIn('\tcopilot',status)
+        for engine in ('kiro-cli','agent','grok'):
+            self.cli('switch',self.config,'android',engine)
+            self.wait(lambda:any(e.get('id')=='android' and e.get('args') and 'handoff' in str(e['args']) for e in self.events()))
+            self.assertIn('\t'+engine,self.cli('status',self.config).stdout)
+        after = {r.split('\t')[0]:r.split('\t')[1] for r in self.cli('status',self.config).stdout.splitlines()}
+        self.assertEqual(before,after)
+
+    def test_list_does_not_probe_and_watch_stop_preserves_agents(self):
+        result = self.cli('list')
+        self.assertIn('kiro-cli',result.stdout)
+        self.assertIn('Cursor',result.stdout)
+        self.assertNotIn('Probando',result.stderr)
+        self.assertEqual(self.events(),[])
+        self.start()
+        self.cli('watch',self.config,'--detach')
+        digest = xc.hashlib.sha256(str(self.config).encode()).hexdigest()
+        watchlock = self.root/'state/xcontrol'/('watch-'+digest+'.lock')
+        self.wait(lambda:watchlock.exists())
+        self.assertIn('already running',self.cli('watch',self.config,'--detach').stdout)
+        self.cli('watch',self.config,'--stop')
+        self.assertEqual(len(self.events()),2)
+        self.assertIn('android',self.cli('status',self.config).stdout)
+        self.cli('switch',self.config,'--auto','android',ok=False)
+
+    def test_replacement_guard_can_cancel_before_interrupting(self):
+        from unittest.mock import patch
+        self.start()
+        before=self.cli('status',self.config).stdout
+        with patch.dict(os.environ,self.env), patch.object(xc,'STATE',self.root/'state/xcontrol'):
+            path,session,agents=xc.load(self.config)
+            for decisions in ([False],[True,False]):
+                with self.assertRaisesRegex(ValueError,'changed'), patch.object(xc,'tmux',wraps=xc.tmux):
+                    answer=iter(decisions)
+                    xc.switch(path,session,agents,'android','copilot',can_replace=lambda:next(answer))
+        self.assertEqual(before,self.cli('status',self.config).stdout)
+        self.assertEqual(len(self.events()),2)
 
     def test_switch_back_to_codex_preserves_opt_out_and_starts_fresh(self):
         self.config.write_text(self.config.read_text().replace('agent="codex"', 'agent="codex"\nbypass=false'))
@@ -445,5 +490,60 @@ class AvailabilityTest(unittest.TestCase):
             with patch.dict(os.environ, {'PATH':directory+':'+os.environ['PATH']}):
                 self.assertEqual(xc.model_availability('copilot'), 'unavailable')
         self.assertEqual(xc.model_availability('unknown-custom-agent'), 'unknown')
+
+class WatchTest(unittest.TestCase):
+    def test_quota_hint_requires_stability_and_rejects_network_auth_errors(self):
+        message = "You've hit your usage limit. Try again later."
+        first, ready = xc.quota_candidate(message, None, 100)
+        self.assertFalse(ready)
+        self.assertFalse(xc.quota_candidate(message,first,159)[1])
+        self.assertTrue(xc.quota_candidate(message,first,160)[1])
+        self.assertFalse(xc.quota_candidate(message+' changed',first,200)[1])
+        for text in ['HTTP 429 Too Many Requests','Forbidden: unauthorized','connection timed out',
+                     'context window exceeded', 'Token limit exceeded', 'model unavailable']:
+            self.assertFalse(xc.quota_error(text),text)
+            self.assertEqual(xc.quota_candidate(text,first,200),(None,False))
+        for text in [message,'usage_limit_reached','insufficient_quota','Weekly limit reached',
+                     'No remaining credits']:
+            self.assertTrue(xc.quota_error(text),text)
+
+    def test_watcher_requires_independent_quota_confirmation_and_unchanged_screen(self):
+        from unittest.mock import patch
+        from contextlib import nullcontext
+        for result, changed, expected in [('available',False,False),('unavailable',False,False),
+                                           ('limited',True,False),('limited',False,True)]:
+            with self.subTest(result=result,changed=changed):
+                captures = iter(['usage_limit_reached','changed' if changed else 'usage_limit_reached'])
+                def mux(*args,**kwargs):
+                    if args[0]=='capture-pane': return next(captures)
+                    if args[0]=='show-options': return 'token' if '@xcontrol_watch' in args else 'codex'
+                    return ''
+                with patch.object(xc,'load',return_value=(Path('/tmp/test.agents'),'session',[])), \
+                     patch.object(xc,'lock',return_value=nullcontext()), \
+                     patch.object(xc,'managed',return_value=True), \
+                     patch.object(xc,'peers',return_value=[['android','%1','python3','0']]), \
+                     patch.object(xc,'tmux',side_effect=mux), \
+                     patch.object(xc,'quota_candidate',return_value=(('hash',0),True)), \
+                     patch.object(xc,'model_availability',return_value=result) as probe, \
+                     patch.object(xc,'switch') as switch, \
+                     patch.object(xc.time,'sleep',side_effect=KeyboardInterrupt):
+                    with self.assertRaises(KeyboardInterrupt): xc.watch_worker('/tmp/test.agents','token')
+                    self.assertEqual(switch.called,expected)
+                    if expected: self.assertIn('codex',switch.call_args.kwargs['excluded'])
+                    probe.assert_called_once_with('codex')
+
+    def test_quota_failure_and_extended_probe_answers(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as directory:
+            cli=Path(directory)/'grok'
+            cli.write_text('#!/usr/bin/env python3\nimport sys\nprint("usage_limit_reached",file=sys.stderr)\nraise SystemExit(1)\n')
+            cli.chmod(0o755)
+            with patch.dict(os.environ,{'PATH':directory+':'+os.environ['PATH']}):
+                self.assertEqual(xc.model_availability('grok',timeout=2),'limited')
+        for engine in xc.HANDOFF_ENGINES:
+            if engine not in ('codex','claude'):
+                self.assertTrue(xc.probe_success(engine,'XCONTROL_OK\n'))
+                self.assertFalse(xc.probe_success(engine,'Authenticated successfully'))
+        self.assertTrue(xc.probe_success('kiro-cli','Notice\n> XCONTROL_OK\n'))
 
 if __name__=='__main__': unittest.main()

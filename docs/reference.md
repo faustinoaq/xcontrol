@@ -40,7 +40,7 @@ Folders resolve relative to the `.agents` file, not your terminal directory. Abs
 
 Optional `resume = "auto"` is the default: Codex resumes its latest unarchived interactive CLI thread for that exact directory, using read-only local SQLite metadata. Claude uses its native `--continue` in that directory. Copilot uses a stable workspace-specific native `--session-id`, creating or resuming its xcontrol conversation without selecting an unrelated global session. `resume = "new"` starts fresh; a session UUID resumes an explicit native conversation. Histories are not converted between CLIs. If Codex's metadata is unavailable, it starts fresh with a warning.
 
-Optional `prompt = "..."` submits an initial instruction for Codex, Copilot, or Claude when paired with `resume = "new"`. For auto selection, all candidates must be one of those three. This is separate from the displayed role.
+Optional `prompt = "..."` submits an initial instruction for any supported CLI when paired with `resume = "new"`. For auto selection, all candidates must support initial prompts. This is separate from the displayed role.
 
 **Codex panes bypass approvals and sandboxing by default**, using `--dangerously-bypass-approvals-and-sandbox`, so they can control tmux and communicate with peers. This gives Codex unrestricted access under your user account. Set `bypass = false` on a Codex or auto agent to inherit normal Codex permissions instead; for auto agents this setting applies only when Codex is selected. Availability probes remain restricted. Copilot, Claude, and custom CLIs keep their normal permissions. All CLIs inherit your model and authentication settings. Roles are printed in each pane; they are **not automatically sent as prompts**. The `agent` field names an executable on your PATH, and optional `args` are passed as literal arguments. xcontrol does not evaluate shell syntax. Use configuration files you trust: launching an agent runs that executable with your normal account access.
 
@@ -59,11 +59,11 @@ candidates = ["codex", "copilot", "claude"]
 role = "Backend services and shared APIs."
 ```
 
-The default candidate order is Codex, Copilot, then Claude. Missing and failed candidates are skipped. If none confirms access, xcontrol opens no panes. `xc availability myapp.agents` runs the same checks; **it makes small model calls**. `xc check` only validates configuration and makes no calls.
+The default candidate order is `codex`, `copilot`, `claude`, `agy`, `devin`, `kiro-cli`, `agent` (Cursor), then `grok`. You can set a shorter or different order with `candidates`. Missing and failed candidates are skipped. If none confirms access, xcontrol opens no panes. `xc availability myapp.agents` runs the same checks; **it makes small model calls**. `xc check` only validates configuration and makes no calls.
 
-For Codex, Copilot, and Claude, xcontrol sends a tiny prompt asking for `XCONTROL_OK` through `codex exec`, `copilot -p`, or `claude -p`. It requires both a successful exit and the actual model answer. A failed probe is retried once, including authorization failures that can be temporary. Results are cached per provider for one launch, so multiple panes do not repeat the same checks. Each attempt has a 30-second timeout. Reattaching makes no calls.
+For supported CLIs, xcontrol sends a tiny prompt asking for `XCONTROL_OK` through `codex exec`, `copilot -p`, `claude -p`, `agy -p`, `devin -p`, `kiro-cli chat --no-interactive`, `agent -p`, or `grok -p`. It prints `Probando <CLI>...` before checking access. It requires both a successful exit and the actual model answer. A failed probe is retried once, including authorization failures that can be temporary. Results are cached per provider for one launch, so multiple panes do not repeat the same checks. Each attempt has a 30-second timeout. Reattaching makes no calls.
 
-Probes run in a temporary directory, outside your project folders, without resuming your work conversations. Claude and Copilot tools are disabled for the probe; Codex uses its read-only sandbox. Installed CLI configuration is trusted, including any user-configured integrations. These checks consume a little usage and may incur charges under your existing provider billing settings. They use the CLI's default model selection, without forcing a premium model or changing billing settings. A successful probe confirms access at that moment, not how much quota remains or access to every model. A failed check only skips that provider for this launch; it does not diagnose a permanent subscription problem.
+Probes run in a temporary directory, outside your project folders, without resuming your work conversations. Claude, Copilot, Grok and the temporary Kiro profile disable tools for the probe. Codex uses its read-only sandbox; agy enables its sandbox. Cursor uses ask mode and its sandbox, trusting only the temporary folder. Devin uses auto permissions, which require approval for writes and commands, without forcing its optional OS sandbox (which requires additional system packages). These are provider permission controls, not an xcontrol security boundary. Installed CLI configuration is trusted, including any user-configured integrations. These checks consume a little usage and may incur charges under your existing provider billing settings. They use the CLI's default model selection, without forcing a premium model or changing billing settings. A successful probe confirms access at that moment, not how much quota remains or access to every model. A failed check only skips that provider for this launch; it does not diagnose a permanent subscription problem.
 
 Other CLIs can use a trusted custom checker in `[availability]`, which also overrides a built-in probe:
 
@@ -76,7 +76,7 @@ devin = ["my-access-check", "devin"]
 
 Noninteractive commands for custom checkers include [Devin's `devin -p`](https://docs.devin.ai/cli/reference/commands), [Gemini's `gemini -p`](https://geminicli.com/docs/cli/headless/), and [OpenCode's `opencode run`](https://opencode.ai/docs/cli/). A checker should also validate a model answer and restrict tools appropriately; merely invoking a CLI or checking login status does not prove model access.
 
-The chosen CLI appears in the pane title and `xc status`. Auto agents accept `resume = "auto"` or `"new"`; custom candidates start fresh. CLI-specific arguments and explicit session UUIDs require selecting that CLI explicitly. Reattaching keeps the existing selection. Use `xc switch` to request a handoff in one running pane. Quota detection is not automatic.
+The chosen CLI appears in the pane title and `xc status`. Auto agents accept `resume = "auto"` or `"new"`; custom candidates start fresh. CLI-specific arguments and explicit session UUIDs require selecting that CLI explicitly. Reattaching keeps the existing selection. Use `xc switch` to request a handoff in one running pane. Quota watching is optional; see below.
 
 ## Switch a running pane
 
@@ -87,38 +87,46 @@ xc switch myapp.agents server agy --note "Finish the API review, no deployment"
 xc switch myapp.agents server
 ```
 
-Run this from another pane or terminal while the target is idle or waiting for quota. It replaces the selected CLI in the same pane. Other panes, role IDs, working folders, and peer communication stay in place. Supported destinations are Codex, Copilot, Claude, `agy`, and Devin, using their normal authentication and default model. `agy` uses `--prompt-interactive`, as documented by its local `--help`. Devin uses an interactive prompt after `--` and `--process-model in-process` so the handoff owns its process. Switching does not enable permission bypass for Copilot, Claude, agy, or Devin. Codex respects the role's `bypass` setting, defaulting to true.
+Run this from another pane or terminal while the target is idle or waiting for quota. It replaces the selected CLI in the same pane. Other panes, role IDs, working folders, and peer communication stay in place. Supported destinations are `codex`, `copilot`, `claude`, `agy`, `devin`, `kiro-cli`, `agent` (Cursor), and `grok`, using their normal authentication and default model. `agy` uses `--prompt-interactive`, as documented by its local `--help`. Devin uses an interactive prompt after `--` and `--process-model in-process` so the handoff owns its process. Switching does not enable permission bypass for other CLIs. Codex respects the role's `bypass` setting, defaulting to true.
 
-An explicit CLI is launched without a model probe. With no destination (or `auto`), xcontrol checks the configured candidates in order, excluding the current CLI, and picks the first with confirmed access. Defaults are Codex, Copilot, and Claude. These checks consume usage. `agy` and `devin` can be selected explicitly; automatic selection requires adding them to an auto role's candidates and providing a trusted `[availability]` checker. If no alternative passes or its CLI/folder lock is busy, the current pane stays unchanged.
+An explicit CLI is launched without a model probe. With no destination (or `auto`), xcontrol rotates through configured candidates starting after the current CLI, excludes that CLI, and picks the next with confirmed access. All eight supported CLIs have built-in probes. Custom checkers may override them. These checks consume usage. If no alternative passes or its CLI/folder lock is busy, the current pane stays unchanged.
+
+`xc switch myapp.agents --auto` applies this to every configured role, sharing probe results for that command. It replaces running CLIs immediately, so run it when ready to hand off their work, from outside the affected panes. A failed role stays unchanged while others may switch; the command returns nonzero if any failed. This changes the running selections, not the `.agents` file.
 
 The new conversation receives a prompt to read a local handoff file, verify project instructions and current Git state, and continue only clearly authorized unfinished work. The snapshot includes up to 2,000 lines of available terminal history (capped at 192 Ki characters), Git branch/HEAD/status, the optional note, and a link to any previous handoff. No model call is needed to summarize the old session. Snapshots do not contain the complete native conversation and may miss earlier instructions. Use `--note` to clarify the task when needed.
 
 Handoffs are saved under `$XDG_STATE_HOME/xcontrol/handoffs`, defaulting to `~/.local/state/xcontrol/handoffs`, with directory mode 700 and file mode 600. They may contain private terminal output. The replacement provider can read that content. Files remain local until the CLI reads them, are not committed, and are kept until you remove them. Terminal text is marked as untrusted data; the new prompt tells the agent to preserve authorization boundaries.
 
-The `.agents` file is unchanged. Reattaching keeps the switched CLI; stopping and reopening uses the file's configured CLI again. Old native histories remain available through each provider's own history. xcontrol does not monitor quota errors or switch providers without an explicit command. A failure after the pane is replaced, such as a login failure in the new CLI, cannot restore the old running process.
+The `.agents` file is unchanged. Reattaching keeps the switched CLI; stopping and reopening uses the file's configured CLI again. Old native histories remain available through each provider's own history. Optional `xc watch` can monitor quota errors after you enable it. A failure after the pane is replaced, such as a login failure in the new CLI, cannot restore the old running process.
 
-## Other CLI agents, including Devin
+## Optional quota watcher
 
-Any interactive CLI agent on your PATH can run in a pane. Codex, Copilot, and Claude have built-in resume handling. Other agents use the executable and arguments you provide.
-
-For example, [Devin CLI](https://docs.devin.ai/cli) starts locally with `devin`. To use it for the server, replace the server entry with:
-
-```toml
-[[agents]]
-id = "server"
-folder = "./myapp-server"
-agent = "devin"
-args = []
-role = "Backend services; coordinate API contracts with android and ios."
+```sh
+xc watch myapp.agents             # foreground, Ctrl+C stops the watcher
+xc watch myapp.agents --detach    # background
+xc watch myapp.agents --stop      # disable; leave agents running
 ```
 
-Install and authenticate the CLI separately. Custom agents default to `resume = "new"`; xcontrol does not guess their session flags. To resume a conversation, set `args` to that CLI's documented resume arguments. Arguments are passed directly, without a shell, environment-variable expansion, or command substitution. Optional `args` also work with the three built-in agents.
+This is a local Python supervisor, not an extra model agent. It checks live pane screens about every 30 seconds without model calls. It requires a recognizable quota notice in the last 12 screen lines and an unchanged screen for at least 60 seconds. It then probes that same provider separately. Only an explicit quota failure permits a handoff; authentication errors, timeouts, generic HTTP 429 errors, context limits and unknown failures do not. If the screen changes during confirmation, it does not switch. This is best-effort terminal detection, not a guaranteed provider event API; unrecognized notices need manual switching. A stable screen cannot prove there are no background tasks. Enable only when automatic interruption on a confirmed quota failure is appropriate.
 
-The same `xc status` and `xc send` commands work with custom agents that accept terminal text input. Prompt submission and busy-state behavior depend on the CLI; xcontrol does not provide agent-specific readiness detection. Devin's launch command is documented by its vendor; the generic launcher is tested with a simulated executable, not a live Devin account.
+The next provider comes from that role's candidates, using normal access probes and the existing handoff snapshot. A watched role never returns to a provider already confirmed exhausted during that watch run. Once alternatives run out, it stays in place. Failed confirmation or replacement is retried no more than once every five minutes per pane/provider. Stopping and restarting the watcher clears its exhausted-provider memory. The normal model checks still use the CLI's own model and billing settings, so watching does not guarantee free usage.
+
+One watcher runs per config, protected by an OS lock. Background logs are private files in `$XDG_STATE_HOME/xcontrol` (default `~/.local/state/xcontrol`); they contain check results and handoff paths, not captured terminal content. No external service is installed. The watcher exits when disabled or when its tmux group ends. Disabling prevents further handoffs after an in-flight check finishes, but cannot undo a handoff already completed. Enabling does not edit the configuration and is not restored when reopening the group. Closed panes follow tmux settings and are not recreated by the watcher.
+
+## Installed tools and custom CLIs
+
+`xc list` lists the eight supported executable names and whether they are on PATH. It makes no model calls and does not equate installation with access. `xc list --check` tests each installed supported CLI, printing progress before each call. No account identifiers or raw provider errors are printed. It does not scan or execute arbitrary programs on PATH.
+
+Any other interactive CLI, including Kimi, Muse, OpenCode or Aider, can run using `agent = "<executable>"` and literal `args`. These are not installed or probed automatically. Use their documented session flags in `args`; custom CLIs default to `resume = "new"`. They can participate in initial auto selection through trusted `[availability]` checkers. Built-in handoff and quota watching require a supported adapter; a generic CLI is not enough to safely guess prompt and error formats.
+
+Codex, Copilot and Claude retain built-in resume handling. The other supported CLIs start fresh unless their documented native resume arguments are supplied. Kiro launches as `kiro-cli chat`. Provider configuration and authentication remain the user's responsibility. Free/paid access is determined by the provider and account, not by xcontrol.
 
 ## Commands
 
 ```sh
+xc list                          # installed supported CLIs, no model calls
+xc list --check                  # test each installed supported CLI
+xc switch myapp.agents --auto     # hand off all roles
 xc                               # show usage without launching anything
 xc .                             # setup agent in the current directory
 xc ./myapp                       # setup agent in another directory
