@@ -24,7 +24,7 @@ class LauncherTest(unittest.TestCase):
         self.env = dict(os.environ, HOME=str(self.root), XDG_STATE_HOME=str(self.root/'state'), TMUX_TMPDIR=str(self.root), CODEX_HOME=str(self.root/'codex'), LOG=str(self.root/'events'))
         self.env.pop('TMUX', None)
         (self.root/'bin').mkdir()
-        for engine in ('codex', 'claude', 'copilot', 'devin'):
+        for engine in ('codex', 'claude', 'copilot', 'devin', 'agy'):
             script = self.root/'bin'/engine
             script.write_text('#!/usr/bin/env python3\nimport os,sys,json\nwith open(os.environ["LOG"],"a") as f:f.write(json.dumps({"id":os.environ["XCONTROL_AGENT"],"cwd":os.getcwd(),"args":sys.argv[1:],"config":os.environ["XCONTROL_CONFIG"]})+"\\n")\nfor line in sys.stdin:\n with open(os.environ["LOG"],"a") as f:f.write(json.dumps({"message":line.strip()})+"\\n")\n')
             script.chmod(0o755)
@@ -192,6 +192,92 @@ class LauncherTest(unittest.TestCase):
             self.cli('check', self.config, ok=False)
         self.config.write_text(original.replace('agent="claude"', 'agent="claude"\nbypass=true'))
         self.cli('check', self.config, ok=False)
+
+    def test_switch_preserves_pane_peers_and_literal_context(self):
+        self.start()
+        before = self.cli('status', self.config).stdout
+        target = next(line.split('\t')[1] for line in before.splitlines() if line.startswith('android\t'))
+        self.cli('send', self.config, 'android', 'User task: review pending code without deploying')
+        self.wait(lambda:any(e.get('message') == 'User task: review pending code without deploying' for e in self.events()))
+        note = 'Keep changes. Do not deploy. $(touch /tmp/xc-switch-injection)'
+        self.cli('switch', self.config, 'android', 'copilot', '--note', note)
+        self.wait(lambda: len([e for e in self.events() if e.get('id') == 'android']) == 2)
+        after = self.cli('status', self.config).stdout
+        self.assertIn('android\t' + target, after)
+        self.assertIn('\tcopilot', after)
+        self.assertIn(next(line for line in before.splitlines() if line.startswith('ios\t')), after)
+        event = [e for e in self.events() if e.get('id') == 'android'][-1]
+        self.assertEqual(event['args'][0], '-i')
+        self.assertNotIn('--session-id', event['args'])
+        self.assertIn('untrusted terminal history', event['args'][1])
+        self.assertNotIn('--dangerously-bypass-approvals-and-sandbox', event['args'])
+        files = list((self.root/'state/xcontrol/handoffs').glob('*.md'))
+        self.assertEqual(len(files), 1)
+        self.assertEqual(files[0].stat().st_mode & 0o777, 0o600)
+        self.assertIn(note, files[0].read_text())
+        self.assertIn('User task: review pending code', files[0].read_text())
+        self.cli('send', self.config, 'android', 'Continue the review')
+        self.wait(lambda:any(e.get('message') == 'Continue the review' for e in self.events()))
+        self.cli('switch', self.config, 'android', 'agy')
+        self.wait(lambda: len([e for e in self.events() if e.get('id') == 'android']) == 3)
+        event = [e for e in self.events() if e.get('id') == 'android'][-1]
+        self.assertEqual(event['args'][0], '--prompt-interactive')
+        self.assertIn('\tagy', self.cli('status', self.config).stdout)
+        self.assertEqual(len([e for e in self.events() if e.get('id') == 'ios']), 1)
+        self.cli('switch', self.config, 'android', 'devin')
+        self.wait(lambda: len([e for e in self.events() if e.get('id') == 'android']) == 4)
+        event = [e for e in self.events() if e.get('id') == 'android'][-1]
+        self.assertEqual(event['args'][:3], ['--process-model', 'in-process', '--'])
+        self.assertNotIn('dangerous', event['args'])
+        snapshots = list((self.root/'state/xcontrol/handoffs').glob('*.md'))
+        self.assertEqual(len(snapshots), 3)
+        self.assertEqual(sum('Previous handoff' in p.read_text() for p in snapshots), 2)
+        self.assertIn('\tdevin', self.cli('status', self.config).stdout)
+
+    def test_switch_back_to_codex_preserves_opt_out_and_starts_fresh(self):
+        self.config.write_text(self.config.read_text().replace('agent="codex"', 'agent="codex"\nbypass=false'))
+        self.start()
+        self.cli('switch', self.config, 'android', 'copilot')
+        self.wait(lambda: len([e for e in self.events() if e.get('id') == 'android']) == 2)
+        self.cli('switch', self.config, 'android', 'codex')
+        self.wait(lambda: len([e for e in self.events() if e.get('id') == 'android']) == 3)
+        event = [e for e in self.events() if e.get('id') == 'android'][-1]
+        self.assertNotIn('--dangerously-bypass-approvals-and-sandbox', event['args'])
+        self.assertNotIn('resume', event['args'])
+        self.assertIn('untrusted terminal history', event['args'][-1])
+
+    def test_switch_validation_does_not_interrupt_existing_agent(self):
+        self.start()
+        original = self.cli('status', self.config).stdout
+        for ident, engine in [('missing', 'copilot'), ('android', 'codex'), ('android', 'unsupported-agent')]:
+            self.cli('switch', self.config, ident, engine, ok=False)
+            self.assertEqual(self.cli('status', self.config).stdout, original)
+        target = next(line.split('\t')[1] for line in original.splitlines() if line.startswith('android\t'))
+        self.env['TMUX_PANE'] = target
+        self.cli('switch', self.config, 'android', 'copilot', ok=False)
+        self.assertEqual(len([e for e in self.events() if 'id' in e]), 2)
+
+    def test_switch_auto_excludes_current_and_failure_leaves_it_running(self):
+        self.start()
+        self.config.write_text('availability={copilot=["python3","-c","raise SystemExit(0)"]}\n' + self.config.read_text())
+        self.cli('switch', self.config, 'android')
+        self.wait(lambda: len([e for e in self.events() if e.get('id') == 'android']) == 2)
+        self.assertIn('\tcopilot', self.cli('status', self.config).stdout)
+        self.config.write_text(self.config.read_text().replace('availability={copilot=["python3","-c","raise SystemExit(0)"]}',
+            'availability={codex=["python3","-c","raise SystemExit(1)"],claude=["python3","-c","raise SystemExit(1)"]}'))
+        self.cli('switch', self.config, 'android', ok=False)
+        self.assertIn('\tcopilot', self.cli('status', self.config).stdout)
+        self.assertEqual(len([e for e in self.events() if 'id' in e]), 3)
+
+    def test_switch_rejects_workspace_lock_conflict(self):
+        self.start()
+        other = self.root/'other.agents'
+        other.write_text('name="other"\n[[agents]]\nid="other"\nfolder="android space"\nagent="copilot"\n')
+        self.cli(other, '--detach')
+        self.wait(lambda:len([e for e in self.events() if 'id' in e]) == 3)
+        self.cli('switch', self.config, 'android', 'copilot', ok=False)
+        self.assertIn('\tcodex', self.cli('status', self.config).stdout)
+        self.assertEqual(len([e for e in self.events() if 'id' in e]), 3)
 
     def test_no_arguments_shows_help_without_starting(self):
         result = self.cli(cwd=self.root)

@@ -76,7 +76,26 @@ devin = ["my-access-check", "devin"]
 
 Noninteractive commands for custom checkers include [Devin's `devin -p`](https://docs.devin.ai/cli/reference/commands), [Gemini's `gemini -p`](https://geminicli.com/docs/cli/headless/), and [OpenCode's `opencode run`](https://opencode.ai/docs/cli/). A checker should also validate a model answer and restrict tools appropriately; merely invoking a CLI or checking login status does not prove model access.
 
-The chosen CLI appears in the pane title and `xc status`. Auto agents accept `resume = "auto"` or `"new"`; custom candidates start fresh. CLI-specific arguments and explicit session UUIDs require selecting that CLI explicitly. Reattaching keeps the existing selection. There is no mid-task failover or conversation transfer between providers; stop and reopen the group to select again.
+The chosen CLI appears in the pane title and `xc status`. Auto agents accept `resume = "auto"` or `"new"`; custom candidates start fresh. CLI-specific arguments and explicit session UUIDs require selecting that CLI explicitly. Reattaching keeps the existing selection. Use `xc switch` to request a handoff in one running pane. Quota detection is not automatic.
+
+## Switch a running pane
+
+```sh
+xc switch myapp.agents server copilot
+xc switch myapp.agents server devin
+xc switch myapp.agents server agy --note "Finish the API review, no deployment"
+xc switch myapp.agents server
+```
+
+Run this from another pane or terminal while the target is idle or waiting for quota. It replaces the selected CLI in the same pane. Other panes, role IDs, working folders, and peer communication stay in place. Supported destinations are Codex, Copilot, Claude, `agy`, and Devin, using their normal authentication and default model. `agy` uses `--prompt-interactive`, as documented by its local `--help`. Devin uses an interactive prompt after `--` and `--process-model in-process` so the handoff owns its process. Switching does not enable permission bypass for Copilot, Claude, agy, or Devin. Codex respects the role's `bypass` setting, defaulting to true.
+
+An explicit CLI is launched without a model probe. With no destination (or `auto`), xcontrol checks the configured candidates in order, excluding the current CLI, and picks the first with confirmed access. Defaults are Codex, Copilot, and Claude. These checks consume usage. `agy` and `devin` can be selected explicitly; automatic selection requires adding them to an auto role's candidates and providing a trusted `[availability]` checker. If no alternative passes or its CLI/folder lock is busy, the current pane stays unchanged.
+
+The new conversation receives a prompt to read a local handoff file, verify project instructions and current Git state, and continue only clearly authorized unfinished work. The snapshot includes up to 2,000 lines of available terminal history (capped at 192 Ki characters), Git branch/HEAD/status, the optional note, and a link to any previous handoff. No model call is needed to summarize the old session. Snapshots do not contain the complete native conversation and may miss earlier instructions. Use `--note` to clarify the task when needed.
+
+Handoffs are saved under `$XDG_STATE_HOME/xcontrol/handoffs`, defaulting to `~/.local/state/xcontrol/handoffs`, with directory mode 700 and file mode 600. They may contain private terminal output. The replacement provider can read that content. Files remain local until the CLI reads them, are not committed, and are kept until you remove them. Terminal text is marked as untrusted data; the new prompt tells the agent to preserve authorization boundaries.
+
+The `.agents` file is unchanged. Reattaching keeps the switched CLI; stopping and reopening uses the file's configured CLI again. Old native histories remain available through each provider's own history. xcontrol does not monitor quota errors or switch providers without an explicit command. A failure after the pane is replaced, such as a login failure in the new CLI, cannot restore the old running process.
 
 ## Other CLI agents, including Devin
 

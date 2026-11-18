@@ -104,7 +104,22 @@ agent = "auto"
 candidates = ["codex", "copilot", "claude"]
 ```
 
-xcontrol tries them in order with a small model call and picks the first that answers. These calls count toward usage and may cost money. Reattaching doesn't check again, and running agents don't switch providers mid-task.
+xcontrol tries them in order with a small model call and picks the first that answers. These calls count toward usage and may cost money. Reattaching doesn't check again. To change a running pane, use `xc switch`.
+
+## Hit a usage limit?
+
+Switch just that pane from another terminal:
+
+```sh
+xc switch myapp.agents server copilot
+xc switch myapp.agents server agy
+xc switch myapp.agents server devin
+xc switch myapp.agents server             # check for an available alternative
+```
+
+The new CLI gets the role, recent terminal history, and Git state. Other panes keep running. Add `--note "what to continue"` if useful.
+
+Switch when the old agent is idle or blocked: it is replaced. This starts a fresh conversation, not a full history import. Selection without a CLI makes small access-check calls. Limits are not watched automatically.
 
 ## Ask your agent to set it up
 
