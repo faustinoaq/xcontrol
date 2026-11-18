@@ -69,7 +69,9 @@ A setup agent inspects the current folder and its immediate children, then sugge
 
 Plain `xc` just shows help.
 
-Writing a message yourself? Press your tmux prefix, then `Alt+m` to toggle **MANUAL** mode for that pane. Peer messages wait in a local queue. Toggle it off when the agent has an empty, ready prompt; pending messages arrive together in one submission. Other panes keep working.
+**Before typing, we recommend turning on MANUAL mode.** Your keyboard and peer messages share the agent's input field, so an incoming message can mix with your draft when MANUAL is off. Typing is always allowed; xcontrol does not detect it or pause deliveries automatically.
+
+Press your tmux prefix (default `Ctrl+b`), then `Alt+m`, and wait for **MANUAL** in the pane border before typing. Peer messages wait in a local queue. After submitting or clearing your draft, toggle it off when the agent has an empty, ready prompt; pending messages arrive together in one submission. Other panes keep working.
 
 For a group already running when you update xcontrol, run `xc manual myapp.agents --bind` once to install the shortcut without restarting agents. You can also use `xc manual myapp.agents server on` and `off`. This is an explicit pause, not automatic typing detection.
 

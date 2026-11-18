@@ -227,6 +227,8 @@ xc send "$XCONTROL_CONFIG" server "Can you confirm the API contract for Android 
 
 ### Protect manual input
 
+MANUAL mode is recommended whenever you type directly into a managed agent. With it off, keyboard input remains enabled and `xc send` uses that same input field: incoming peer messages can mix with an unfinished draft or submit it. There is no automatic typing lock. Leaving a draft in a pane and switching focus does not protect it; keep MANUAL enabled until you have submitted or cleared the draft.
+
 Press your tmux prefix, then `Alt+m` to toggle MANUAL mode for the selected managed pane. The border shows `MANUAL` and a pending-message count. This only pauses xcontrol deliveries to that pane; the CLI keeps running and peers can still communicate elsewhere. New groups install the shortcut automatically. For an existing group, run `xc manual myapp.agents --bind`, without restarting or messaging agents. An existing prefix `Alt+m` binding is preserved with a warning. The binding lives in this tmux server's shared prefix table and acts only on managed panes. Custom prefix tables need their own binding.
 
 ```sh
