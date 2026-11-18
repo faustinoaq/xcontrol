@@ -564,6 +564,10 @@ def compact_request(target, process, dead, ident):
     # not recognize slash commands submitted as pasted content. Never clear
     # the composer or interrupt a running turn. Use only at an empty idle prompt.
     tmux('send-keys', '-t', target, '-l', native)
+    # Rapid literal keys can activate a TUI's paste-burst guard, which treats
+    # an immediate Enter as a newline. Let that window expire before the one
+    # submit key; waiting after Enter would leave the draft unsent.
+    time.sleep(0.5)
     tmux('send-keys', '-t', target, 'Enter')
     print(f'{ident}: requested {native} in {LABELS[engine]}. The CLI controls execution and completion.')
 

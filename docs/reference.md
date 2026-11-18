@@ -119,7 +119,7 @@ One watcher runs per config, protected by an OS lock. Background logs are privat
 xc compact myapp.agents server
 ```
 
-Use the configuration and xcontrol role ID shown by `xc status`, not a provider's session UUID. Run from another pane or terminal while the recipient has an empty idle prompt; a command sent into a busy composer, menu or existing draft may not execute as intended. xcontrol refuses its own target pane, shells, dead panes and unsupported custom CLIs. It types only the provider's native slash command and Enter, without clearing input, sending an interrupt, restarting the process, switching providers or editing saved history itself. The result means the command was submitted, not that compaction completed; check the recipient pane. There is no universal CLI readiness or completion API.
+Use the configuration and xcontrol role ID shown by `xc status`, not a provider's session UUID. Run from another pane or terminal while the recipient has an empty idle prompt; a command sent into a busy composer, menu or existing draft may not execute as intended. xcontrol refuses its own target pane, shells, dead panes and unsupported custom CLIs. It types the provider's native slash command, waits 0.5 seconds for the TUI's rapid-input detection to settle, then sends one Enter, without clearing input, sending an interrupt, restarting the process, switching providers or editing saved history itself. The result means the command was submitted, not that compaction completed; check the recipient pane. There is no universal CLI readiness or completion API.
 
 | CLI | Native command | Reference |
 | --- | --- | --- |

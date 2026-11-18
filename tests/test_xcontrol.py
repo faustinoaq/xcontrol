@@ -294,6 +294,42 @@ while True:
         subprocess.run(['tmux','set-option','-p','-t',target,'@xcontrol_engine','custom-tool'],env=self.env,check=True)
         self.cli('compact',self.config,'android',ok=False)
 
+    def test_compact_waits_out_tui_burst_before_single_enter(self):
+        # Like Codex's paste-burst guard, a rapid Enter inserts a newline
+        # instead of submitting. Waiting afterwards cannot submit that draft.
+        script = self.root/'bin'/'codex'
+        script.write_text(r'''#!/usr/bin/env python3
+import json, os, time, tty
+tty.setraw(0)
+with open(os.environ['LOG'], 'a') as f:
+    f.write(json.dumps({'id': os.environ['XCONTROL_AGENT']})+'\n')
+buf = b''
+last_char = 0
+while True:
+    chunk = os.read(0, 4096)
+    if not chunk:
+        break
+    for char in chunk:
+        if char == 13:
+            suppressed = time.monotonic() - last_char < .12
+            with open(os.environ['LOG'], 'a') as f:
+                f.write(json.dumps({'enter': True, 'suppressed': suppressed})+'\n')
+            if suppressed:
+                buf += b'\n'
+            else:
+                with open(os.environ['LOG'], 'a') as f:
+                    f.write(json.dumps({'message': buf.decode()})+'\n')
+                buf = b''
+        else:
+            buf += bytes([char])
+            last_char = time.monotonic()
+''')
+        self.start()
+        self.cli('compact', self.config, 'android')
+        self.wait(lambda: any(e.get('enter') for e in self.events()))
+        self.assertEqual([e['suppressed'] for e in self.events() if e.get('enter')], [False])
+        self.assertEqual([e['message'] for e in self.events() if 'message' in e], ['/compact'])
+
     def test_agent_and_shell_panes_follow_tmux_exit_setting(self):
         self.start()
         def tmux(*args):
