@@ -41,7 +41,6 @@ Installs `xc` and `xcontrol` into `~/.local/bin` and the included skill into `~/
 ```sh
 cd ~/code/myapp
 xc .
-# Or simply: xc
 ```
 
 xcontrol checks installed Codex, Copilot, and Claude in that order, using the same small access probes as `agent = "auto"`. It opens one setup agent in tmux and submits a starter prompt to inspect the project, find installed CLIs, and suggest folders and roles for an `.agents` file. The prompt asks it to confirm the proposed team with you before writing the file. Custom CLIs can be added to the resulting file explicitly.
@@ -146,7 +145,8 @@ The same `xc status` and `xc send` commands work with custom agents that accept 
 ## Commands
 
 ```sh
-xc                               # setup agent in the current directory
+xc                               # show usage without launching anything
+xc .                             # setup agent in the current directory
 xc ./myapp                       # setup agent in another directory
 xc check myapp.agents             # validate without launching CLIs
 xc availability myapp.agents      # test model access (uses a small prompt)

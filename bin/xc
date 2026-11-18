@@ -384,11 +384,16 @@ def main():
     if len(sys.argv) in (4, 5) and sys.argv[1] == '--pane':
         return pane(*sys.argv[2:])
     parser = argparse.ArgumentParser(description=__doc__, epilog='Examples: xc myapp.agents | xc status myapp.agents | xc send myapp.agents ios "Review the shared API"')
-    parser.add_argument('action_or_file', nargs='?', default='.', help='directory (default: .), project.agents, check, availability, status, send, or stop')
+    parser.add_argument('action_or_file', nargs='?', help='directory, project.agents, check, availability, status, send, or stop')
     parser.add_argument('rest', nargs='*')
     parser.add_argument('--detach', action='store_true', help='start without attaching')
     parser.add_argument('-k', '--kill', action='store_true', help='close this project group')
     args = parser.parse_args()
+    if args.action_or_file is None:
+        if args.detach or args.kill:
+            parser.error('A directory or .agents file is required.')
+        parser.print_help()
+        return 0
     action = args.action_or_file
     if action in ('check', 'availability', 'status', 'send', 'stop'):
         if not args.rest:

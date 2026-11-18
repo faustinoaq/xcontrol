@@ -193,12 +193,21 @@ class LauncherTest(unittest.TestCase):
         self.config.write_text(original.replace('agent="claude"', 'agent="claude"\nbypass=true'))
         self.cli('check', self.config, ok=False)
 
+    def test_no_arguments_shows_help_without_starting(self):
+        result = self.cli(cwd=self.root)
+        self.assertIn('usage:', result.stdout)
+        self.assertEqual(self.events(), [])
+        self.assertFalse((self.root/'state').exists())
+        for option in ('--detach', '-k'):
+            self.cli(option, cwd=self.root, ok=False)
+        self.assertFalse((self.root/'state').exists())
+
     def test_directory_bootstrap_launch_reattach_and_stop(self):
         script = self.root/'bin'/'codex'
         original = script.read_text()
         script.write_text(original.replace('import os,sys,json\n',
             'import os,sys,json\nif "exec" in sys.argv:\n print(json.dumps({"type":"item.completed","item":{"type":"agent_message","text":"XCONTROL_OK"}}))\n print(json.dumps({"type":"turn.completed"}))\n sys.exit(0)\n'))
-        self.cli('--detach', cwd=self.root)
+        self.cli('.', '--detach', cwd=self.root)
         self.wait(lambda: len(self.events()) == 1)
         event = self.events()[0]
         self.assertEqual(event['cwd'], str(self.root))
