@@ -65,7 +65,7 @@ Need help creating one? Run this in your project:
 xc .
 ```
 
-A setup agent looks at your folders and suggests a team. It asks before writing your config. This checks model access with small calls that count toward your usage.
+A setup agent inspects the current folder and its immediate children, then suggests a team. In an empty folder, tell it what you want to build. The prompt limits discovery to your project; it does not sandbox filesystem access. It asks before writing your config. This checks model access with small calls that count toward your usage.
 
 Plain `xc` just shows help.
 
@@ -99,7 +99,7 @@ Folders are relative to this file. Roles are labels, not prompts. Use separate f
 
 Codex, Copilot, and Claude resume conversations by default. Add `resume = "new"` to start fresh. Other CLIs, such as Devin, work too: set `agent` to their executable name and add any flags in `args`.
 
-**Codex runs with approvals and sandboxing disabled by default.** Set `bypass = false` to keep its normal permissions. Other CLIs keep their own defaults.
+**Codex runs with approvals and sandboxing disabled by default.** Set `bypass = false` to keep native permissions. For other supported CLIs, add `bypass = true` to skip tool approvals. On `agent = "auto"`, that setting follows the role when providers switch. It grants broad access under your user account; existing panes need a relaunch to pick it up. Custom CLIs use their own `args`.
 
 ## Everyday commands
 

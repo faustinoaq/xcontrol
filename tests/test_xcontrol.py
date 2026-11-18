@@ -97,6 +97,44 @@ class LauncherTest(unittest.TestCase):
         self.wait(lambda:any(e.get('message')==text for e in self.events()))
         self.cli('send',self.config,'unknown','hello',ok=False)
 
+    def test_paste_submit_waits_for_tui_and_works_without_focus(self):
+        # Emulate a TUI that drops Enter while its paste debounce is active.
+        script = self.root/'bin'/'claude'
+        script.write_text(r'''#!/usr/bin/env python3
+import json, os, time, tty
+tty.setraw(0)
+os.write(1, b'\x1b[?2004h')
+with open(os.environ['LOG'], 'a') as f:
+    f.write(json.dumps({'id': os.environ['XCONTROL_AGENT']})+'\n')
+buf = b''
+last_paste = 0
+while True:
+    chunk = os.read(0, 4096)
+    if not chunk:
+        break
+    buf += chunk
+    marker = b'\x1b[201~'
+    if marker in buf and not last_paste:
+        last_paste = time.monotonic()
+    if b'\r' in chunk:
+        if last_paste and time.monotonic()-last_paste >= .2:
+            message = buf.replace(b'\x1b[200~', b'').replace(marker, b'').rstrip(b'\r').decode()
+            with open(os.environ['LOG'], 'a') as f:
+                f.write(json.dumps({'message': message})+'\n')
+            buf = b''
+            last_paste = 0
+''')
+        self.start()
+        lines = self.cli('status', self.config).stdout.splitlines()
+        target = next(line.split('\t')[1] for line in lines if line.startswith('ios\t'))
+        other = next(line.split('\t')[1] for line in lines if line.startswith('android\t'))
+        subprocess.run(['tmux', 'select-pane', '-t', other], env=self.env, check=True)
+        message = 'A multiline request\nwith one submission.'
+        self.cli('send', self.config, 'ios', message)
+        self.wait(lambda: any(e.get('message') == message for e in self.events()))
+        active = subprocess.check_output(['tmux', 'display-message', '-p', '-t', target, '#{pane_active}'], env=self.env, text=True)
+        self.assertEqual(active.strip(), '0')
+
     def test_duplicate_messages_expire_and_allow_explicit_resend(self):
         self.start()
         message='Review the shared API; report actionable findings only.'
@@ -266,8 +304,33 @@ class LauncherTest(unittest.TestCase):
         for value in ['"true"', '1']:
             self.config.write_text(original.replace('agent="codex"', 'agent="codex"\nbypass='+value))
             self.cli('check', self.config, ok=False)
-        self.config.write_text(original.replace('agent="claude"', 'agent="claude"\nbypass=true'))
+        self.config.write_text(original.replace('agent="claude"', 'agent="custom-cli"\nbypass=true'))
         self.cli('check', self.config, ok=False)
+
+    def test_bypass_for_all_supported_providers_and_prompts(self):
+        flags = {
+            'codex': ['--dangerously-bypass-approvals-and-sandbox'],
+            'claude': ['--dangerously-skip-permissions'],
+            'copilot': ['--allow-all'],
+            'agy': ['--dangerously-skip-permissions'],
+            'devin': ['--permission-mode', 'dangerous', '--respect-workspace-trust', 'false'],
+            'kiro-cli': ['--trust-all-tools', '--trust-workspace'],
+            'agent': ['--force', '--trust', '--sandbox', 'disabled'],
+            'grok': ['--always-approve'],
+        }
+        for engine, expected in flags.items():
+            for prompt in ('', 'Implement the demo'):
+                with self.subTest(engine=engine, prompt=bool(prompt)):
+                    config = dict(agent=engine, resume='new', folder=str(self.root), bypass=True, prompt=prompt)
+                    args = xc.command(config)
+                    for flag in expected:
+                        self.assertIn(flag, args)
+                    if prompt:
+                        self.assertEqual(args[-1], prompt)
+                    config['bypass'] = False
+                    self.assertNotIn(expected[0], xc.command(config))
+                    del config['bypass']
+                    self.assertEqual(expected[0] in xc.command(config), engine == 'codex')
 
     def test_switch_preserves_pane_peers_and_literal_context(self):
         self.start()
@@ -404,6 +467,16 @@ class LauncherTest(unittest.TestCase):
         self.assertEqual(before,self.cli('status',self.config).stdout)
         self.assertEqual(len(self.events()),2)
 
+    def test_switch_preserves_explicit_bypass_for_other_providers(self):
+        self.config.write_text(self.config.read_text().replace('agent="codex"', 'agent="codex"\nbypass=true'))
+        self.start()
+        for index, (engine, flag) in enumerate((('copilot', '--allow-all'), ('devin', '--permission-mode'), ('agent', '--force')), 2):
+            self.cli('switch', self.config, 'android', engine)
+            self.wait(lambda: len([e for e in self.events() if e.get('id') == 'android']) == index)
+            event = [e for e in self.events() if e.get('id') == 'android'][-1]
+            self.assertIn(flag, event['args'])
+            self.assertIn('untrusted terminal history', event['args'][-1])
+
     def test_switch_back_to_codex_preserves_opt_out_and_starts_fresh(self):
         self.config.write_text(self.config.read_text().replace('agent="codex"', 'agent="codex"\nbypass=false'))
         self.start()
@@ -499,6 +572,9 @@ class LauncherTest(unittest.TestCase):
         self.assertEqual(event['cwd'], str(self.root))
         self.assertEqual(event['id'], 'setup')
         self.assertIn('Ask me to confirm', event['args'][-1])
+        self.assertIn('Never search a parent directory, sibling projects', event['args'][-1])
+        self.assertIn('If the directory\nis empty, say so and ask', event['args'][-1])
+        self.assertIn('Do not follow\nsymlinks outside the root', event['args'][-1])
         self.assertNotIn('resume', event['args'])
         generated = Path(event['config'])
         self.assertTrue(generated.is_relative_to(self.root/'state'))

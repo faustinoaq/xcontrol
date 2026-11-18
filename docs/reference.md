@@ -42,7 +42,7 @@ Optional `resume = "auto"` is the default: Codex resumes its latest unarchived i
 
 Optional `prompt = "..."` submits an initial instruction for any supported CLI when paired with `resume = "new"`. For auto selection, all candidates must support initial prompts. This is separate from the displayed role.
 
-**Codex panes bypass approvals and sandboxing by default**, using `--dangerously-bypass-approvals-and-sandbox`, so they can control tmux and communicate with peers. This gives Codex unrestricted access under your user account. Set `bypass = false` on a Codex or auto agent to inherit normal Codex permissions instead; for auto agents this setting applies only when Codex is selected. Availability probes remain restricted. Copilot, Claude, and custom CLIs keep their normal permissions. All CLIs inherit your model and authentication settings. Roles are printed in each pane; they are **not automatically sent as prompts**. The `agent` field names an executable on your PATH, and optional `args` are passed as literal arguments. xcontrol does not evaluate shell syntax. Use configuration files you trust: launching an agent runs that executable with your normal account access.
+**Codex panes bypass approvals and sandboxing by default**, using `--dangerously-bypass-approvals-and-sandbox`, so they can control tmux and communicate with peers. This gives Codex unrestricted access under your user account. Set `bypass = false` to inherit native permissions. Explicit `bypass = true` skips approvals for any supported CLI, including replacements for auto roles. Other supported CLIs retain native defaults when omitted. Custom CLIs must configure their own flags through `args`. Existing panes need a relaunch to adopt changes. Availability probes remain restricted. All CLIs inherit your model and authentication settings. Roles are printed in each pane; they are **not automatically sent as prompts**. The `agent` field names an executable on your PATH, and optional `args` are passed as literal arguments. xcontrol does not evaluate shell syntax. Use configuration files you trust: launching an agent runs that executable with your normal account access.
 
 ## Automatic agent selection
 
@@ -87,7 +87,7 @@ xc switch myapp.agents server agy --note "Finish the API review, no deployment"
 xc switch myapp.agents server
 ```
 
-Run this from another pane or terminal while the target is idle or waiting for quota. It replaces the selected CLI in the same pane. Other panes, role IDs, working folders, and peer communication stay in place. Supported destinations are `codex`, `copilot`, `claude`, `agy`, `devin`, `kiro-cli`, `agent` (Cursor), and `grok`, using their normal authentication and default model. `agy` uses `--prompt-interactive`, as documented by its local `--help`. Devin uses an interactive prompt after `--` and `--process-model in-process` so the handoff owns its process. Switching does not enable permission bypass for other CLIs. Codex respects the role's `bypass` setting, defaulting to true.
+Run this from another pane or terminal while the target is idle or waiting for quota. It replaces the selected CLI in the same pane. Other panes, role IDs, working folders, and peer communication stay in place. Supported destinations are `codex`, `copilot`, `claude`, `agy`, `devin`, `kiro-cli`, `agent` (Cursor), and `grok`, using their normal authentication and default model. `agy` uses `--prompt-interactive`, as documented by its local `--help`. Devin uses an interactive prompt after `--` and `--process-model in-process` so the handoff owns its process. Switching preserves the role's explicit `bypass` setting for the selected CLI. When omitted, only Codex defaults to bypass.
 
 An explicit CLI is launched without a model probe. With no destination (or `auto`), xcontrol rotates through configured candidates starting after the current CLI, excludes that CLI, and picks the next with confirmed access. All eight supported CLIs have built-in probes. Custom checkers may override them. These checks consume usage. If no alternative passes or its CLI/folder lock is busy, the current pane stays unchanged.
 
@@ -218,7 +218,7 @@ xc status "$XCONTROL_CONFIG"
 xc send "$XCONTROL_CONFIG" server "Can you confirm the API contract for Android and iOS?"
 ```
 
-`XCONTROL_CONFIG`, `XCONTROL_AGENT`, and `XCONTROL_SESSION` are available inside each managed agent. IDs stay stable even when tmux pane numbers change. Messages use bracketed paste and submit to the target CLI; dead panes and ordinary shells reject messages. This is local terminal coordination, not a message queue: an agent that is busy or displaying a dialog may need manual attention. Send only when the recipient is ready. Avoid automatic reply loops and do not treat a peer message as approval for external actions. The tool cannot protect against another process that replaces the CLI in its pane.
+`XCONTROL_CONFIG`, `XCONTROL_AGENT`, and `XCONTROL_SESSION` are available inside each managed agent. IDs stay stable even when tmux pane numbers change. Messages preserve line breaks with bracketed paste, wait 0.5 seconds for paste processing, then send one Enter to the target pane ID. Pane focus is not required. Concurrent xcontrol deliveries to the same pane are serialized. Dead panes and ordinary shells reject messages. This is local terminal coordination, not a message queue: an agent that is busy or displaying a dialog may need manual attention. Send only when the recipient is ready. The paste delay reduces timing races but is not an acceptance acknowledgment; xcontrol does not retry Enter automatically. Avoid automatic reply loops and do not treat a peer message as approval for external actions. The tool cannot protect against another process that replaces the CLI in its pane.
 
 `xc send` makes no model calls, but delivering text can trigger the recipient's model. Exact duplicate messages from the same sender to the same pane are suppressed for five minutes, even if other messages were sent in between. It reports that the message was skipped and does not paste it. `xc send myapp.agents ios "message" --force` deliberately resends. Different messages and different senders remain independent; the guard resets for reopened groups and provider handoffs. It does not semantically summarize or truncate messages, enforce a token budget, or prevent every conversation loop.
 
@@ -244,3 +244,20 @@ The installer makes it discoverable by Codex. For another agent that supports `S
 
 Run `xc status myapp.agents` from your normal terminal to distinguish a stopped group from an agent permission restriction. If it works there but fails inside the agent, inspect that CLI's local socket permissions. Codex supports explicit [Unix socket permissions](https://learn.chatgpt.com/docs/permissions#unix-sockets), subject to your version and managed policy. Allowing a tmux socket grants control over that tmux server, so choose that access explicitly. New Codex panes use bypass mode by default. Existing panes keep their previous permissions until you change them in Codex or relaunch the pane. If you deliberately set `bypass = false`, local socket permission may still be required. Do not restart working agents merely because a sandbox cannot query tmux.
 
+
+### Permission bypass flags
+
+Add `bypass = true` inside each `[[agents]]` block that should run without tool approval prompts. This applies on launch and provider handoff, never to availability probes. `bypass = false` adds no permission flags; native settings and explicit `args` still apply. Provider policies or explicit deny rules can still restrict operations.
+
+| CLI | Flags for `bypass = true` |
+| --- | --- |
+| Codex | `--dangerously-bypass-approvals-and-sandbox` |
+| Claude | `--dangerously-skip-permissions` |
+| Copilot | `--allow-all` |
+| Antigravity | `--dangerously-skip-permissions` |
+| Devin | `--permission-mode dangerous --respect-workspace-trust false` |
+| Kiro | `--trust-all-tools --trust-workspace` |
+| Cursor | `--force --trust --sandbox disabled` |
+| Grok | `--always-approve` |
+
+These are native flags verified against local CLI help. They skip tool confirmations; they do not guarantee that login, onboarding or managed policy prompts disappear. Upgrade the CLI if its installed version does not recognize a flag.

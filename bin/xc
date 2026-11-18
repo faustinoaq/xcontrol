@@ -78,8 +78,8 @@ def load(filename):
         engine = agent.get('agent', 'codex')
         if engine != 'auto' and not executable(engine):
             raise ValueError('agent must be an executable name on PATH, without shell syntax or paths.')
-        if 'bypass' in agent and (type(agent['bypass']) is not bool or engine not in ('codex', 'auto')):
-            raise ValueError('bypass must be a boolean and applies to Codex or auto agents only.')
+        if 'bypass' in agent and (type(agent['bypass']) is not bool or engine not in (*HANDOFF_ENGINES, 'auto')):
+            raise ValueError('bypass must be a boolean and requires a supported CLI or auto agent.')
         extra_args = agent.get('args', [])
         if not argv(extra_args):
             raise ValueError('args must be a list of strings without NUL bytes.')
@@ -295,20 +295,32 @@ def latest_codex(cwd):
 
 def command(agent):
     engine, resume = agent['agent'], agent['resume']
-    extra = list(agent.get('args', []))
+    permission_args = {
+        'codex': ['--dangerously-bypass-approvals-and-sandbox'],
+        'claude': ['--dangerously-skip-permissions'],
+        'copilot': ['--allow-all'],
+        'agy': ['--dangerously-skip-permissions'],
+        'devin': ['--permission-mode', 'dangerous', '--respect-workspace-trust', 'false'],
+        'kiro-cli': ['--trust-all-tools', '--trust-workspace'],
+        'agent': ['--force', '--trust', '--sandbox', 'disabled'],
+        'grok': ['--always-approve'],
+    }
+    permissions = permission_args.get(engine, []) if agent.get('bypass', engine == 'codex') else []
+    base_args = [*permissions, *agent.get('args', [])]
+    extra = list(base_args)
     if agent.get('prompt'):
         extra += (['-i', agent['prompt']] if engine == 'copilot' else [agent['prompt']])
     if engine == 'devin' and agent.get('prompt'):
-        return ['devin', '--process-model', 'in-process', *agent.get('args', []), '--', agent['prompt']]
+        return ['devin', '--process-model', 'in-process', *base_args, '--', agent['prompt']]
     if engine == 'kiro-cli':
-        return ['kiro-cli', 'chat', *agent.get('args', []), *([agent['prompt']] if agent.get('prompt') else [])]
+        return ['kiro-cli', 'chat', *base_args, *([agent['prompt']] if agent.get('prompt') else [])]
     if engine == 'agy' and agent.get('prompt'):
-        return ['agy', *agent.get('args', []), '--prompt-interactive', agent['prompt']]
+        return ['agy', *base_args, '--prompt-interactive', agent['prompt']]
     if engine not in ('codex', 'claude', 'copilot'):
         return [engine, *extra]
     if engine == 'codex':
         sid = latest_codex(agent['folder']) if resume == 'auto' else (None if resume == 'new' else resume)
-        return ['codex', *(['resume'] if sid else []), '--no-daemon', *(['--dangerously-bypass-approvals-and-sandbox'] if agent.get('bypass', True) else []), '-C', agent['folder'], *([sid] if sid else []), *extra]
+        return ['codex', *(['resume'] if sid else []), '--no-daemon', '-C', agent['folder'], *([sid] if sid else []), *extra]
     if engine == 'copilot' and resume == 'auto':
         # Copilot accepts a UUID for either a new or an existing session.
         # A workspace-specific ID avoids resuming an unrelated global session.
@@ -426,14 +438,20 @@ def send(session, ident, message, force=False):
 
 
 def paste_message(target, message):
-    # Bracketed paste prevents embedded newlines from becoming separate submissions.
-    buffer = 'xc-' + os.urandom(8).hex()
-    subprocess.run(['tmux', 'load-buffer', '-b', buffer, '-'], input=message, text=True, check=True)
-    try:
-        tmux('paste-buffer', '-p', '-b', buffer, '-t', target)
-        tmux('send-keys', '-t', target, 'Enter')
-    finally:
-        tmux('delete-buffer', '-b', buffer, check=False)
+    # Serialize all senders to this pane, not just each sender's dedup route.
+    delivery = hashlib.sha256(target.encode()).hexdigest()
+    with lock('paste-' + delivery + '.lock', blocking=True):
+        # Bracketed paste keeps embedded newlines from submitting partial messages.
+        buffer = 'xc-' + os.urandom(8).hex()
+        subprocess.run(['tmux', 'load-buffer', '-b', buffer, '-'], input=message, text=True, check=True)
+        try:
+            tmux('paste-buffer', '-p', '-r', '-b', buffer, '-t', target)
+            # Let TUIs finish processing the paste before submitting it. tmux
+            # completing paste-buffer does not mean the application consumed it.
+            time.sleep(0.5)
+            tmux('send-keys', '-t', target, 'Enter')
+        finally:
+            tmux('delete-buffer', '-b', buffer, check=False)
 
 
 def compact(session, ident):
@@ -745,7 +763,20 @@ def directory_config(directory, action):
     if target.exists() or action != 'open':
         return target
     prompt = """Help me set up xcontrol for this project. First read project instructions and inspect
-this directory and its immediate child folders, read-only. Check which of codex,
+this directory and its immediate child folders, read-only.
+
+Treat the initial working directory as the project root. Keep project discovery
+inside that root. Never search a parent directory, sibling projects, or the home
+directory to find project instructions or infer a missing project. Do not follow
+symlinks outside the root. Inherited instructions and the xcontrol skill may be
+read at their exact known paths; this does not authorize exploring nearby folders.
+For ancestor AGENTS.md instructions, check only exact ancestor AGENTS.md paths,
+never recursively search an ancestor directory. Inspect only the root and one
+level of child folders, not a recursive scan of their contents. If the directory
+is empty, say so and ask what the user wants to build; do not look elsewhere.
+Use xc list to discover installed CLIs instead of searching their config folders.
+
+Check which of codex,
 copilot, claude, agy, devin, kiro-cli, agent (Cursor), and grok are installed
 using xc list. Other CLI agents can also be
 configured explicitly, with their documented args; do not guess availability.
@@ -777,8 +808,8 @@ printed, not automatically submitted as prompts. Keep peer messages brief and on
 a concrete question, blocker, decision, or final result once. Batch questions, refer
 to files rather than copying long content, and do not send acknowledgments or status
 polls without new information. Never include secrets in the configuration. Codex panes bypass approvals and sandboxing by default;
-set bypass = false on Codex or auto agents to inherit normal Codex permissions.
-For auto agents this setting applies only if Codex is selected.
+Set bypass = true explicitly to skip approvals on any supported CLI, including auto handoffs.
+Set bypass = false to inherit native permissions. Other providers keep native defaults when omitted.
 """
     target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     config = ('name = "setup"\n[[agents]]\nid = "setup"\nfolder = ' + json.dumps(str(folder), ensure_ascii=False)
