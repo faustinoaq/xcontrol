@@ -329,7 +329,7 @@ class LauncherTest(unittest.TestCase):
         result = self.cli('list')
         self.assertIn('kiro-cli',result.stdout)
         self.assertIn('Cursor',result.stdout)
-        self.assertNotIn('Probando',result.stderr)
+        self.assertNotIn('Checking',result.stderr)
         self.assertEqual(self.events(),[])
         self.start()
         self.cli('watch',self.config,'--detach')

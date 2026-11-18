@@ -231,7 +231,7 @@ def availability(engine, checks, cwd, progress=True):
         return 'not installed'
     interactive = progress and sys.stderr.isatty()
     if progress:
-        print(f'Probando {LABELS.get(engine, engine)} ({engine})...', file=sys.stderr,
+        print(f'Checking {LABELS.get(engine, engine)} ({engine})...', file=sys.stderr,
               end='' if interactive else '\n', flush=True)
     try:
         if engine in checks:
@@ -613,7 +613,7 @@ def watch_worker(filename, token, guard_fd=None):
                     cooldown[key] = now + 300
                     # Custom checkers report access, not why it failed. Never
                     # infer exhaustion from a network failure or a generic 429.
-                    print(f'Probando {LABELS.get(engine, engine)} ({engine}) para confirmar límite...', flush=True)
+                    print(f'Checking {LABELS.get(engine, engine)} ({engine}) to confirm usage limit...', flush=True)
                     if model_availability(engine) != 'limited' or not enabled():
                         continue
                     # Abort if the terminal changed while the probe ran.
@@ -879,7 +879,7 @@ def main():
             prefix = f'{engine:<{name_width}}  {LABELS.get(engine, engine):<{label_width}}  '
             interactive = args.check and sys.stdout.isatty()
             if interactive:
-                print(prefix + 'Probando...', end='', flush=True)
+                print(prefix + 'Checking...', end='', flush=True)
             try:
                 state = availability(engine, {}, Path.cwd(), progress=not interactive) if args.check else 'installed'
             finally:
