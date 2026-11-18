@@ -97,6 +97,19 @@ class LauncherTest(unittest.TestCase):
         self.wait(lambda:any(e.get('message')==text for e in self.events()))
         self.cli('send',self.config,'unknown','hello',ok=False)
 
+    def test_agent_and_shell_panes_follow_tmux_exit_setting(self):
+        self.start()
+        def tmux(*args):
+            return subprocess.check_output(['tmux', *args], env=self.env, text=True).strip()
+        rows = self.cli('status', self.config).stdout.splitlines()
+        agents = [row.split('\t')[1] for row in rows]
+        for target in agents:
+            self.assertEqual(tmux('show-options', '-pqv', '-t', target, 'remain-on-exit'), '')
+        shell = tmux('split-window', '-t', agents[0], '-P', '-F', '#{pane_id}', 'sleep 0.2')
+        self.wait(lambda: shell not in tmux('list-panes', '-a', '-F', '#{pane_id}').splitlines())
+        tmux('send-keys', '-t', agents[0], 'C-d')
+        self.wait(lambda: agents[0] not in tmux('list-panes', '-a', '-F', '#{pane_id}').splitlines())
+
     def test_duplicate_workspace_other_group_rejected(self):
         self.start()
         other = self.root/'other.agents'
@@ -123,6 +136,7 @@ class LauncherTest(unittest.TestCase):
     def test_dead_pane_rejects_message(self):
         self.start()
         pane = self.cli('status',self.config).stdout.splitlines()[0].split('\t')[1]
+        subprocess.run(['tmux','set-option','-p','-t',pane,'remain-on-exit','on'],env=self.env,check=True)
         subprocess.run(['tmux','send-keys','-t',pane,'C-c'],env=self.env,check=True)
         self.wait(lambda:'exited' in self.cli('status',self.config).stdout)
         self.cli('send',self.config,'android','do not run in shell',ok=False)

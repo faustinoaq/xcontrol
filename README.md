@@ -160,6 +160,8 @@ xc myapp.agents -k                # same
 
 Use tmux's `Ctrl+b d` to detach while leaving agents running. Reopening the same file attaches to its existing group. Different configuration paths have different groups. Editing a running configuration does not reconfigure existing panes: stop and reopen to apply changes. Closing a group interrupts active agents, so save important work first.
 
+All panes follow your tmux `remain-on-exit` setting. With `set -g remain-on-exit off`, panes close when their agent exits. Saved conversations remain available through the CLI's native session history.
+
 Locks prevent this launcher from opening the same CLI/folder pair twice; separate worktrees are recommended for concurrent editing. Sessions started outside xcontrol are not detected. Git synchronization, task scheduling, recovery of crashed agents, and deployment are left to you.
 
 ## Communication
