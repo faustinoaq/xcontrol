@@ -449,6 +449,7 @@ def main():
                     if index == 0:
                         target = tmux('new-session', '-d', '-s', session, '-n', 'agents', '-c', agent['folder'], '-x', '200', '-y', '50', '-P', '-F', '#{pane_id}', cmd)
                         tmux('set-option', '-t', session, '@xcontrol_config', str(path))
+                        tmux('set-option', '-t', session, 'mouse', 'on')
                         tmux('set-option', '-t', session, 'pane-border-status', 'top')
                         tmux('set-option', '-t', session, 'pane-border-format', ' #{pane_title} ')
                     else:
