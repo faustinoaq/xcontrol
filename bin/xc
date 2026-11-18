@@ -663,10 +663,12 @@ def main():
     if action == 'list':
         if args.rest or args.auto or args.stop or args.note or args.kill or args.detach:
             parser.error('Use xc list [--check].')
+        name_width = max(map(len, HANDOFF_ENGINES))
+        label_width = max(len(LABELS.get(engine, engine)) for engine in HANDOFF_ENGINES)
         for engine in HANDOFF_ENGINES:
             installed = shutil.which(engine)
             state = availability(engine, {}, Path.cwd()) if args.check else ('installed' if installed else 'not installed')
-            print(f'{engine}\t{LABELS.get(engine, engine)}\t{state}', flush=True)
+            print(f'{engine:<{name_width}}  {LABELS.get(engine, engine):<{label_width}}  {state}', flush=True)
         return 0
     if args.check:
         parser.error('--check applies only to xc list.')
