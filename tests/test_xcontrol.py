@@ -194,7 +194,8 @@ while True:
     if marker in buf and not last_paste:
         last_paste = time.monotonic()
     if b'\r' in chunk:
-        if last_paste and time.monotonic()-last_paste >= .2:
+        required_delay = 1.2 if len(buf) >= 1024 else .2
+        if last_paste and time.monotonic()-last_paste >= required_delay:
             message = buf.replace(b'\x1b[200~', b'').replace(marker, b'').rstrip(b'\r').decode()
             with open(os.environ['LOG'], 'a') as f:
                 f.write(json.dumps({'message': message})+'\n')
@@ -211,6 +212,11 @@ while True:
         self.wait(lambda: any(e.get('message') == message for e in self.events()))
         active = subprocess.check_output(['tmux', 'display-message', '-p', '-t', target, '#{pane_active}'], env=self.env, text=True)
         self.assertEqual(active.strip(), '0')
+        # A large collapsed paste takes longer than the old fixed 0.5s delay.
+        large_message = ('Review this long message with accents: información.\n' * 100).rstrip()
+        self.cli('send', self.config, 'ios', large_message)
+        self.wait(lambda: any(e.get('message') == large_message for e in self.events()))
+        self.assertEqual([e['message'] for e in self.events() if 'message' in e], [message, large_message])
 
     def test_duplicate_messages_expire_and_allow_explicit_resend(self):
         self.start()

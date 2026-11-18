@@ -460,7 +460,12 @@ def submit_message(target, message):
         tmux('paste-buffer', '-p', '-r', '-b', buffer, '-t', target)
         # Let TUIs finish processing the paste before submitting it. tmux
         # completing paste-buffer does not mean the application consumed it.
-        time.sleep(0.5)
+        # Large/multiline pastes can still be materializing a collapsed draft
+        # after the ordinary debounce. This is a bounded timing allowance,
+        # not an acknowledgment or permission to retry Enter.
+        large = len(message) >= 1024 or message.count('\n') >= 8
+        delay = min(5.0, 1.5 + len(message.encode()) / 16384) if large else 0.5
+        time.sleep(delay)
         tmux('send-keys', '-t', target, 'Enter')
     finally:
         tmux('delete-buffer', '-b', buffer, check=False)
