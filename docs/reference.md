@@ -201,6 +201,8 @@ Use tmux's `Ctrl+b d` to detach while leaving agents running. Reopening the same
 
 Mouse support is enabled for new xcontrol sessions, so you can click panes, resize borders, and scroll. Other tmux sessions keep their existing settings. To disable it in the current session, run `tmux set-option mouse off`.
 
+Agents can move between windows in the same tmux session, and windows can be renamed. Discovery uses each pane's role marker across the session, so status, messaging, compaction and switching still find them. Unmarked panes are ignored. Moving agents to another session is not supported.
+
 All panes follow your tmux `remain-on-exit` setting. With `set -g remain-on-exit off`, panes close when their agent exits. Saved conversations remain available through the CLI's native session history.
 
 Locks prevent this launcher from opening the same CLI/folder pair twice; separate worktrees are recommended for concurrent editing. Sessions started outside xcontrol are not detected. Git synchronization, task scheduling, recovery of crashed agents, and deployment are left to you.

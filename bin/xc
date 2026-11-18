@@ -389,8 +389,8 @@ def stop_all():
 
 
 def peers(session):
-    raw = tmux('list-panes', '-t', session + ':agents', '-F', '#{@xcontrol_id}\t#{pane_id}\t#{pane_current_command}\t#{pane_dead}')
-    return [line.split('\t') for line in raw.splitlines()]
+    raw = run('tmux', 'list-panes', '-s', '-t', '=' + session, '-F', '#{@xcontrol_id}\t#{pane_id}\t#{pane_current_command}\t#{pane_dead}').stdout
+    return [line.split('\t') for line in raw.splitlines() if line.split('\t', 1)[0]]
 
 
 def send(session, ident, message, force=False):

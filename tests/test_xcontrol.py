@@ -97,6 +97,29 @@ class LauncherTest(unittest.TestCase):
         self.wait(lambda:any(e.get('message')==text for e in self.events()))
         self.cli('send',self.config,'unknown','hello',ok=False)
 
+    def test_agents_remain_discoverable_after_window_moves_and_renames(self):
+        self.start()
+        def tmux(*args):
+            return subprocess.check_output(['tmux', *args], env=self.env, text=True).strip()
+        before = self.cli('status', self.config).stdout
+        target = next(line.split('\t')[1] for line in before.splitlines() if line.startswith('ios\t'))
+        session = tmux('display-message', '-p', '-t', target, '#{session_name}')
+        tmux('break-pane', '-d', '-s', target, '-n', 'support')
+        tmux('rename-window', '-t', session + ':agents', 'development')
+        tmux('new-window', '-d', '-t', session, '-n', 'shell')
+        tmux('swap-window', '-s', session + ':shell', '-t', session + ':development')
+        # Identical role markers in unrelated sessions must not become peers.
+        outsider = tmux('new-session', '-d', '-s', 'unrelated', '-P', '-F', '#{pane_id}')
+        tmux('set-option', '-p', '-t', outsider, '@xcontrol_id', 'ios')
+        status = self.cli('status', self.config).stdout
+        self.assertIn('ios\t' + target, status)
+        self.assertEqual(len(status.splitlines()), 2)
+        self.cli('send', self.config, 'ios', 'Review after moving windows')
+        self.wait(lambda: any(e.get('message') == 'Review after moving windows' for e in self.events()))
+        self.cli('switch', self.config, 'ios', 'copilot')
+        self.wait(lambda: len([e for e in self.events() if e.get('id') == 'ios']) == 2)
+        self.assertIn('ios\t' + target, self.cli('status', self.config).stdout)
+
     def test_paste_submit_waits_for_tui_and_works_without_focus(self):
         # Emulate a TUI that drops Enter while its paste debounce is active.
         script = self.root/'bin'/'claude'
