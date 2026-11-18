@@ -130,6 +130,49 @@ class LauncherTest(unittest.TestCase):
         self.wait(lambda:any(e.get('message')==message for e in self.events()))
         self.assertEqual(sum(e.get('message')==message for e in self.events()),1)
 
+    def test_auto_compact_is_opt_in_and_only_delivers_context_policy(self):
+        self.config.write_text('auto_compact=true\n'+self.config.read_text())
+        self.start()
+        events=self.events()
+        for event in events:
+            self.assertIn('auto_compact=true',str(event['args']))
+            self.assertIn('not elapsed time',str(event['args']))
+            self.assertIn('ONE',str(event['args']))
+        self.assertIn('--continue',next(e for e in events if e['id']=='ios')['args'])
+        self.assertEqual(len(events),2)
+        self.assertFalse(any('message' in event for event in events))
+        self.cli('check',self.config)
+
+    def test_auto_compact_rejects_nonboolean_or_unsupported_providers(self):
+        original=self.config.read_text()
+        for value in ['"yes"','1','[]']:
+            self.config.write_text('auto_compact='+value+'\n'+original)
+            self.cli('check',self.config,ok=False)
+        self.config.write_text('auto_compact=true\n'+original.replace('agent="claude"','agent="custom-agent"'))
+        self.cli('check',self.config,ok=False)
+        self.config.write_text('auto_compact=false\n'+original.replace('agent="claude"','agent="custom-agent"'))
+        self.cli('check',self.config)
+
+    def test_compact_requests_native_command_without_restarting(self):
+        self.start()
+        before=self.cli('status',self.config).stdout
+        self.assertIn('requested /compact',self.cli('compact',self.config,'android').stdout)
+        self.wait(lambda:any(e.get('message')=='/compact' for e in self.events()))
+        self.assertEqual(before,self.cli('status',self.config).stdout)
+        self.assertEqual(len([e for e in self.events() if 'id' in e]),2)
+        self.cli('compact',self.config,'unknown',ok=False)
+        self.cli('compact',self.config,ok=False)
+        self.cli('switch',self.config,'android','agent')
+        self.wait(lambda:len([e for e in self.events() if 'id' in e])==3)
+        self.assertIn('requested /compress',self.cli('compact',self.config,'android').stdout)
+        self.wait(lambda:any(e.get('message')=='/compress' for e in self.events()))
+        target=self.cli('status',self.config).stdout.splitlines()[0].split('\t')[1]
+        self.env['TMUX_PANE']=target
+        self.cli('compact',self.config,'android',ok=False)
+        self.env.pop('TMUX_PANE')
+        subprocess.run(['tmux','set-option','-p','-t',target,'@xcontrol_engine','custom-tool'],env=self.env,check=True)
+        self.cli('compact',self.config,'android',ok=False)
+
     def test_agent_and_shell_panes_follow_tmux_exit_setting(self):
         self.start()
         def tmux(*args):
@@ -360,6 +403,8 @@ class LauncherTest(unittest.TestCase):
     def test_no_arguments_shows_help_without_starting(self):
         result = self.cli(cwd=self.root)
         self.assertIn('usage:', result.stdout)
+        self.assertNotIn('█', result.stdout)
+        self.assertIn('█', self.cli('logo').stdout)
         self.assertEqual(self.events(), [])
         self.assertFalse((self.root/'state').exists())
         for option in ('--detach', '-k'):
@@ -462,6 +507,27 @@ class LauncherTest(unittest.TestCase):
         self.assertEqual(self.events()[0]['args'], [])
         self.assertIn('\tdevin', self.cli('status', self.config).stdout)
         self.assertFalse((self.root/'should-not-exist').exists())
+
+
+class HelpLogoTest(unittest.TestCase):
+    def test_svg_pixels_render_with_color_and_unicode_fallback(self):
+        import io
+        from unittest.mock import patch
+        class Terminal(io.StringIO):
+            def isatty(self): return True
+        with patch.dict(os.environ,{'TERM':'xterm'},clear=True):
+            colored=xc.terminal_logo(Terminal())
+            self.assertIn('\033[38;2;',colored)
+            self.assertIn('119;224;181',colored)
+            plain=xc.terminal_logo(io.StringIO())
+            self.assertNotIn('\033',plain)
+            self.assertIn('█',plain)
+            with patch.dict(os.environ,{'NO_COLOR':'1'}):
+                self.assertNotIn('\033',xc.terminal_logo(Terminal()))
+        class AsciiStream(Terminal):
+            @property
+            def encoding(self): return 'ascii'
+        self.assertEqual(xc.terminal_logo(AsciiStream()),'')
 
 
 class ResumeTest(unittest.TestCase):

@@ -49,8 +49,11 @@ def load(filename):
     path = Path(filename).expanduser().resolve(strict=True)
     with path.open('rb') as stream:
         config = tomllib.load(stream)
-    if set(config) - {'name', 'agents', 'availability'}:
-        raise ValueError('Config supports only name, [[agents]], and [availability].')
+    if set(config) - {'name', 'agents', 'availability', 'auto_compact'}:
+        raise ValueError('Config supports only name, auto_compact, [[agents]], and [availability].')
+    auto_compact = config.get('auto_compact', False)
+    if type(auto_compact) is not bool:
+        raise ValueError('auto_compact must be true or false.')
     checks = config.get('availability', {})
     if not isinstance(checks, dict) or any(not executable(engine) or not argv(cmd) or not cmd or not cmd[0] for engine, cmd in checks.items()):
         raise ValueError('availability maps CLI names to nonempty argument lists.')
@@ -108,10 +111,13 @@ def load(filename):
                 raise ValueError('prompt must be nonempty text of at most 64 KiB.')
             if resume != 'new' or (engine not in HANDOFF_ENGINES and engine != 'auto') or (engine == 'auto' and any(c not in HANDOFF_ENGINES for c in candidates)):
                 raise ValueError('Initial prompts require resume = new and supported CLI candidates.')
+        if auto_compact and ((engine == 'auto' and any(c not in HANDOFF_ENGINES for c in candidates))
+                             or engine not in (*HANDOFF_ENGINES, 'auto')):
+            raise ValueError('auto_compact requires supported prompt-capable CLIs.')
         if not isinstance(agent.get('role', ''), str):
             raise ValueError('role must be text.')
         agent.update(agent=engine, folder=str(cwd), resume=resume, args=extra_args,
-                     candidates=candidates, checks=checks)
+                     candidates=candidates, checks=checks, auto_compact=auto_compact)
     digest = hashlib.sha256(str(path).encode()).hexdigest()[:10]
     return path, f'xc-{name}-{digest}', agents
 
@@ -397,6 +403,48 @@ def paste_message(target, message):
         tmux('delete-buffer', '-b', buffer, check=False)
 
 
+def compact(session, ident):
+    matches = [p for p in peers(session) if p[0] == ident]
+    if len(matches) != 1:
+        raise ValueError(f'No unique live pane for agent {ident}.')
+    target, process, dead = matches[0][1:]
+    if dead == '1' or process in ('bash', 'sh', 'zsh', 'fish'):
+        raise ValueError('Agent is not running; refusing to submit a command into a shell.')
+    if os.environ.get('TMUX_PANE') == target:
+        raise ValueError('Request compaction from another pane or terminal after this turn finishes.')
+    engine = tmux('show-options', '-pqv', '-t', target, '@xcontrol_engine')
+    if engine not in HANDOFF_ENGINES:
+        raise ValueError('No native compact adapter for this CLI; use its documented controls directly.')
+    native = '/compress' if engine == 'agent' else '/compact'
+    # Send literal keystrokes rather than bracketed paste: some providers do
+    # not recognize slash commands submitted as pasted content. Never clear
+    # the composer or interrupt a running turn. Use only at an empty idle prompt.
+    tmux('send-keys', '-t', target, '-l', native)
+    tmux('send-keys', '-t', target, 'Enter')
+    print(f'{ident}: requested {native} in {LABELS[engine]}. The CLI controls execution and completion.')
+
+
+def compact_policy(agent):
+    return (
+        'xcontrol policy: auto_compact=true (opt-in, agent-directed). '
+        f'Your role ID is {agent["id"]}; XCONTROL_CONFIG identifies the project. '
+        'Use reliable context-usage information from your CLI to decide whether compaction is needed, '
+        'not elapsed time. Never invent a context percentage. At a safe checkpoint, preserve the task, '
+        'decisions and pending work in an appropriate project file if needed. '
+        'If context is pressured, choose one peer with xc status "$XCONTROL_CONFIG" and send ONE '
+        f'brief request asking them to run xc compact "$XCONTROL_CONFIG" {agent["id"]} '
+        'after your current turn finishes at an empty idle prompt. Finish that turn without starting '
+        'more work; do not request repeatedly or broadcast. With no peer, ask the user once. '
+        'When a peer explicitly requests their own compaction, verify their turn has finished and '
+        'their prompt is empty, then run xc compact "$XCONTROL_CONFIG" <their-role-id>. '
+        'If readiness is unclear, ask the user instead of typing into a busy composer. '
+        'Do not poll peers about context, compact on timers, interrupt work, or treat an arbitrary '
+        'positive reply as permission. Native compaction may use model allowance and lose details. '
+        'These are maintenance instructions, not a new work assignment; preserve existing authorization '
+        'and continue only the already authorized task, if any.'
+    )
+
+
 def pane(filename, ident, selected=None, handoff=None):
     path, session, agents = load(filename)
     agent = next(a for a in agents if a['id'] == ident)
@@ -424,12 +472,15 @@ def pane(filename, ident, selected=None, handoff=None):
         agent['agent'] = selected
         if selected not in BUILTINS:
             agent['resume'] = 'new'
+    if agent.get('auto_compact'):
+        agent['prompt'] = compact_policy(agent) + ('\n\n' + agent['prompt'] if agent.get('prompt') else '')
     key = hashlib.sha256((agent['agent'] + ':' + agent['folder']).encode()).hexdigest()
     with lock(key + '.lock', blocking=True):
         os.chdir(agent['folder'])
         os.environ['XCONTROL_CONFIG'] = str(path)
         os.environ['XCONTROL_AGENT'] = ident
         os.environ['XCONTROL_SESSION'] = session
+        os.environ['XCONTROL_AUTO_COMPACT'] = '1' if agent.get('auto_compact') else '0'
         print(f"xcontrol · {ident} · {agent['agent']}: {agent.get('role', '')}", flush=True)
         print(f"Peers: xc status {shlex.quote(str(path))}", flush=True)
         # close_fds keeps the launcher lock out of the agent's descendants.
@@ -694,17 +745,35 @@ For auto agents this setting applies only if Codex is selected.
     return target
 
 
-class HelpParser(argparse.ArgumentParser):
-    def format_help(self):
-        logo = r"""       /\     /\
-  |__ /  '---'  \ __|
-     / .-------. \
-     | |  | |  | |
-  ___| '-------' |___
- |   '-----------'   |
-         |   |
-"""
-        return logo + '\n  xcontrol\n\n' + super().format_help()
+def terminal_logo(stream):
+    """Pre-rendered SVG pixels; no image libraries or terminal image protocol needed."""
+    try:
+        '▀▄█'.encode(getattr(stream, 'encoding', None) or 'utf-8')
+        if shutil.get_terminal_size().columns < 34:
+            return ''
+        image = json.loads((SCRIPT.parent.parent / 'assets/logo-terminal.json').read_text())
+    except (OSError, ValueError, UnicodeError):
+        return ''
+    palette, rows = image['palette'], image['rows']
+    colors = stream.isatty() and 'NO_COLOR' not in os.environ and os.environ.get('TERM') != 'dumb'
+    output = []
+    for y in range(0, len(rows), 2):
+        line = []
+        for top, bottom in zip(rows[y], rows[y + 1]):
+            a, b = int(top), int(bottom)
+            if colors:
+                fg, bg, glyph = (a, b, '▀') if a else (b, 0, '▄' if b else ' ')
+                cell = '\033[0m'
+                if fg:
+                    cell += '\033[38;2;' + ';'.join(map(str, palette[fg])) + 'm'
+                if bg:
+                    cell += '\033[48;2;' + ';'.join(map(str, palette[bg])) + 'm'
+                line.append(cell + glyph)
+            else:
+                line.append({(False, False): ' ', (True, False): '▀',
+                             (False, True): '▄', (True, True): '█'}[(a > 1, b > 1)])
+        output.append(''.join(line) + ('\033[0m' if colors else ''))
+    return '\n'.join(output) + '\n'
 
 
 def main():
@@ -714,8 +783,8 @@ def main():
         return pane(*sys.argv[2:])
     if len(sys.argv) in (4, 5) and sys.argv[1] == '--pane':
         return pane(*sys.argv[2:])
-    parser = HelpParser(description=__doc__, epilog='Examples: xc myapp.agents | xc status myapp.agents | xc send myapp.agents ios "Review the shared API"')
-    parser.add_argument('action_or_file', nargs='?', help='directory, project.agents, list, check, availability, status, send, switch, watch, or stop')
+    parser = argparse.ArgumentParser(description=__doc__, epilog='Examples: xc myapp.agents | xc status myapp.agents | xc send myapp.agents ios "Review the shared API"')
+    parser.add_argument('action_or_file', nargs='?', help='directory, project.agents, logo, list, check, availability, status, send, compact, switch, watch, or stop')
     parser.add_argument('rest', nargs='*')
     parser.add_argument('--check', action='store_true', help='test model access with xc list (uses provider allowance)')
     parser.add_argument('--auto', action='store_true', help='switch every configured pane to its next available CLI')
@@ -733,6 +802,11 @@ def main():
     action = args.action_or_file
     if args.force and action != 'send':
         parser.error('--force applies only to send.')
+    if action == 'logo':
+        if args.rest or args.check or args.auto or args.stop or args.note or args.kill or args.detach:
+            parser.error('Use xc logo.')
+        print(terminal_logo(sys.stdout) + '\n  xcontrol')
+        return 0
     if action == 'list':
         if args.rest or args.auto or args.stop or args.note or args.kill or args.detach:
             parser.error('Use xc list [--check].')
@@ -759,7 +833,7 @@ def main():
         parser.error('--auto applies only to switch.')
     if args.stop and action != 'watch':
         parser.error('--stop applies only to watch.')
-    if action in ('check', 'availability', 'status', 'send', 'switch', 'watch', 'stop'):
+    if action in ('check', 'availability', 'status', 'send', 'compact', 'switch', 'watch', 'stop'):
         if not args.rest:
             parser.error('A .agents file is required.')
         filename, *extra = args.rest
@@ -768,6 +842,9 @@ def main():
     if action == 'send':
         if len(extra) != 2:
             parser.error('Use xc send project.agents agent-id "message".')
+    elif action == 'compact':
+        if len(extra) != 1:
+            parser.error('Use xc compact project.agents agent-id (the xcontrol role, not a provider UUID).')
     elif action == 'switch':
         if (args.auto and extra) or (not args.auto and len(extra) not in (1, 2)):
             parser.error('Use xc switch project.agents agent-id [cli], or xc switch project.agents --auto.')
@@ -776,7 +853,7 @@ def main():
     if args.note and action != 'switch':
         parser.error('--note applies only to switch.')
     if Path(filename).expanduser().is_dir():
-        if action not in ('open', 'status', 'send', 'switch', 'watch', 'stop'):
+        if action not in ('open', 'status', 'send', 'compact', 'switch', 'watch', 'stop'):
             parser.error('Use an .agents file for check or availability.')
         if not shutil.which('tmux'):
             raise ValueError('Missing dependency: tmux.')
@@ -795,7 +872,7 @@ def main():
         return 0
     if not shutil.which('tmux'):
         raise ValueError('Missing dependency: tmux.')
-    if action in ('status', 'send', 'switch', 'watch', 'stop'):
+    if action in ('status', 'send', 'compact', 'switch', 'watch', 'stop'):
         if not managed(path, session):
             raise ValueError('Project group is not running.')
         if action == 'status':
@@ -804,6 +881,9 @@ def main():
                 print(f'{ident}\t{target}\t{process}\t' + ('exited' if dead == '1' else 'running') + f'\t{engine}')
         elif action == 'send':
             send(session, *extra, force=args.force)
+        elif action == 'compact':
+            with lock('launcher.lock', blocking=True):
+                compact(session, *extra)
         elif action == 'switch':
             with lock('launcher.lock', blocking=True):
                 if args.auto:

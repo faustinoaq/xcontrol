@@ -113,6 +113,39 @@ The next provider comes from that role's candidates, using normal access probes 
 
 One watcher runs per config, protected by an OS lock. Background logs are private files in `$XDG_STATE_HOME/xcontrol` (default `~/.local/state/xcontrol`); they contain check results and handoff paths, not captured terminal content. No external service is installed. The watcher exits when disabled or when its tmux group ends. Disabling prevents further handoffs after an in-flight check finishes, but cannot undo a handoff already completed. Enabling does not edit the configuration and is not restored when reopening the group. Closed panes follow tmux settings and are not recreated by the watcher.
 
+## Optional context compaction
+
+```sh
+xc compact myapp.agents server
+```
+
+Use the configuration and xcontrol role ID shown by `xc status`, not a provider's session UUID. Run from another pane or terminal while the recipient has an empty idle prompt; a command sent into a busy composer, menu or existing draft may not execute as intended. xcontrol refuses its own target pane, shells, dead panes and unsupported custom CLIs. It types only the provider's native slash command and Enter, without clearing input, sending an interrupt, restarting the process, switching providers or editing saved history itself. The result means the command was submitted, not that compaction completed; check the recipient pane. There is no universal CLI readiness or completion API.
+
+| CLI | Native command | Reference |
+| --- | --- | --- |
+| Codex | `/compact` | [Developer commands](https://learn.chatgpt.com/docs/developer-commands?surface=cli) |
+| Claude | `/compact` | [Claude Code cheatsheet](https://support.claude.com/en/articles/14553413-claude-code-cheatsheet) |
+| Copilot | `/compact` | [CLI command reference](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-command-reference) |
+| Antigravity | `/compact` | [CLI changelog, v1.3.5](https://antigravity.google/docs/changelog) |
+| Devin | `/compact` | [Devin CLI](https://devin.ai/cli) |
+| Kiro | `/compact` | [Slash commands](https://kiro.dev/docs/cli/reference/slash-commands/) |
+| Cursor | `/compress` | [Using CLI](https://docs.cursor.com/en/cli/using) |
+| Grok | `/compact` | [Modes and commands](https://docs.x.ai/build/modes-and-commands) |
+
+The compact command is explicit and optional. It has no background timer or elapsed-time trigger, and the quota watcher never invokes it. Native provider auto-compaction settings remain unchanged. Long wall-clock runtime alone does not show how much context is used. Compaction may invoke the provider's model, consumes allowance when applicable, can lose detail, and does not restore exhausted quotas. Keep task boundaries and decisions in project files before requesting it. CLI versions may differ; use native controls directly when a command is unavailable.
+
+### Agent-directed compaction
+
+Add top-level `auto_compact = true` before `[availability]` or any `[[agents]]` table. Only booleans are accepted; omitted or false means disabled. It requires supported prompt-capable CLIs. Newly launched or handed-off agents receive a brief policy in their startup input, alongside any task prompt; resumed sessions receive it as an additional turn, retaining their native history. It may consume a model response. Normal startup input is unchanged when disabled. `XCONTROL_AUTO_COMPACT` is `1` or `0` inside panes.
+
+The policy tells each agent to decide using reliable context information, preserve decisions at a safe checkpoint, and make one concise compaction request to one peer before finishing its turn. That peer should invoke `xc compact <config> <role-id>` only once the requester is at an empty idle prompt. With no peer, or uncertain readiness, the agent asks the user. An arbitrary positive chat reply is never parsed as a command or authorization. There is no extra model supervisor, periodic context polling, token-percentage detector, or guarantee of agent compliance. The policy cannot independently verify that another CLI has finished a turn. Manual compaction remains available even when the policy is disabled.
+
+Reattaching does not resend the policy. Changing the flag does not rewrite prompts inside existing conversations: tell existing agents the new policy, or apply it on their next launch or handoff. Disabling the flag does not revoke instructions already received by a running conversation; tell that agent to stop requesting compaction too. Native provider auto-compaction settings remain untouched.
+
+## Logo command
+
+`xc logo` uses a small block rendering generated from `assets/logo.svg`, retaining the original mint palette on color terminals. The bundled pixel data needs no image library or image protocol at runtime, including inside tmux. `NO_COLOR` and redirected output use a monochrome Unicode rendering. ASCII-only encodings or very narrow terminals omit the image. This does not change the SVG used by the README.
+
 ## Installed tools and custom CLIs
 
 `xc list` shows only supported CLIs installed on PATH. It makes no model calls and does not equate installation with access. `xc list --check` tests each installed supported CLI, replacing `Probando...` with the final state on terminals. Installed/available states are green; unavailable/limited states are red. Redirected output stays plain text; `NO_COLOR` disables colors. No account identifiers or raw provider errors are printed. It does not scan or execute arbitrary programs on PATH.
@@ -124,6 +157,8 @@ Codex, Copilot and Claude retain built-in resume handling. The other supported C
 ## Commands
 
 ```sh
+xc logo                          # show the SVG-derived terminal mascot
+xc compact myapp.agents server   # request native compaction at an idle prompt
 xc list                          # installed supported CLIs, no model calls
 xc list --check                  # test each installed supported CLI
 xc switch myapp.agents --auto     # hand off all roles

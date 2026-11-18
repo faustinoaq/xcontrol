@@ -74,6 +74,7 @@ Codex, Copilot, and Claude resume conversations by default. Add `resume = "new"`
 
 ```sh
 xc myapp.agents                  # start or reattach
+xc logo                         # show the mascot
 xc list                         # installed supported CLIs
 xc list --check                 # test model access
 xc status myapp.agents           # see who's running
@@ -134,6 +135,22 @@ xc watch myapp.agents --stop     # disable it; agents keep running
 ```
 
 The watcher uses no model while waiting. A quota notice must stay unchanged for a minute, then a small model call must also confirm the limit. It passes context to the next available CLI and avoids looping through exhausted providers. Detection depends on each CLI's error messages, so manual switching remains available. It stops with the project group; enable it again after reopening.
+
+## Compact a conversation
+
+```sh
+xc compact myapp.agents server
+```
+
+Request the CLI's own context compaction from another pane, with the target at an empty idle prompt. Cursor receives `/compress`; the others receive `/compact`. Compaction may use model allowance and does not reset usage limits.
+
+To let agents decide when to request it, add this at the top of your `.agents` file, before any tables:
+
+```toml
+auto_compact = true
+```
+
+Off by default. At startup, agents receive instructions to use context pressure as the signal and ask one peer to compact them at a safe pause. No periodic questions or timers. This is an agent policy, not a guaranteed background scheduler; existing conversations need the instruction or a new launch.
 
 ## Ask your agent to set it up
 
