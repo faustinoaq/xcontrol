@@ -342,6 +342,55 @@ class LauncherTest(unittest.TestCase):
         self.assertIn('android',self.cli('status',self.config).stdout)
         self.cli('switch',self.config,'--auto','android',ok=False)
 
+    def test_config_watch_starts_once_and_manual_stop_survives_reattach(self):
+        self.config.write_text('watch=true\n'+self.config.read_text())
+        self.start()
+        self.assertTrue(all('watch=true' in str(e['args']) for e in self.events()))
+        self.assertIn('already running',self.cli('watch',self.config,'--detach').stdout)
+        self.cli(self.config,'--detach')
+        self.assertEqual(len(self.events()),2)
+        self.cli('watch',self.config,'--stop')
+        self.cli(self.config,'--detach')
+        _,session,_=xc.load(self.config)
+        token=subprocess.check_output(['tmux','show-options','-qv','-t',session,'@xcontrol_watch'],env=self.env,text=True).strip()
+        self.assertEqual(token,'')
+        # Closing/reopening starts a new watcher, even if the previous one is stopping.
+        self.cli('stop',self.config)
+        self.cli(self.config,'--detach')
+        self.wait(lambda:len(self.events())==4)
+        self.assertIn('already running',self.cli('watch',self.config,'--detach').stdout)
+        self.cli('watch',self.config,'--stop')
+
+    def test_watch_config_requires_boolean(self):
+        original=self.config.read_text()
+        for value in ['"yes"','1','[]']:
+            self.config.write_text('watch='+value+'\n'+original)
+            self.cli('check',self.config,ok=False)
+        self.config.write_text('watch=false\n'+original)
+        self.cli('check',self.config)
+        self.start()
+        self.assertTrue(all('watch=true' not in str(e['args']) for e in self.events()))
+        self.assertFalse(list((self.root/'state/xcontrol').glob('watch-*.log')))
+
+    def test_ps_and_stop_all_include_missing_configs_but_preserve_other_tmux_sessions(self):
+        self.assertIn('No xcontrol groups',self.cli('ps').stdout)
+        self.start()
+        other=self.root/'other.agents'
+        (self.root/'other').mkdir()
+        other.write_text('name="other"\n[[agents]]\nid="other"\nfolder="other"\n')
+        self.cli(other,'--detach')
+        self.wait(lambda:len(self.events())==3)
+        subprocess.run(['tmux','new-session','-d','-s','ordinary','sleep 120'],env=self.env,check=True)
+        self.assertIn(str(self.config),self.cli('ps').stdout)
+        other.unlink()
+        self.assertIn(str(other),self.cli('ps').stdout)
+        self.cli('stop',self.config,'--all',ok=False)
+        self.cli('stop','--all')
+        self.assertIn('No xcontrol groups',self.cli('ps').stdout)
+        self.assertEqual(subprocess.run(['tmux','has-session','-t','=ordinary'],env=self.env).returncode,0)
+        self.cli('stop','--all')
+        self.cli('stop',ok=False)
+
     def test_replacement_guard_can_cancel_before_interrupting(self):
         from unittest.mock import patch
         self.start()

@@ -49,11 +49,14 @@ def load(filename):
     path = Path(filename).expanduser().resolve(strict=True)
     with path.open('rb') as stream:
         config = tomllib.load(stream)
-    if set(config) - {'name', 'agents', 'availability', 'auto_compact'}:
-        raise ValueError('Config supports only name, auto_compact, [[agents]], and [availability].')
+    if set(config) - {'name', 'agents', 'availability', 'auto_compact', 'watch'}:
+        raise ValueError('Config supports only name, auto_compact, watch, [[agents]], and [availability].')
     auto_compact = config.get('auto_compact', False)
     if type(auto_compact) is not bool:
         raise ValueError('auto_compact must be true or false.')
+    watch_enabled = config.get('watch', False)
+    if type(watch_enabled) is not bool:
+        raise ValueError('watch must be true or false.')
     checks = config.get('availability', {})
     if not isinstance(checks, dict) or any(not executable(engine) or not argv(cmd) or not cmd or not cmd[0] for engine, cmd in checks.items()):
         raise ValueError('availability maps CLI names to nonempty argument lists.')
@@ -117,7 +120,7 @@ def load(filename):
         if not isinstance(agent.get('role', ''), str):
             raise ValueError('role must be text.')
         agent.update(agent=engine, folder=str(cwd), resume=resume, args=extra_args,
-                     candidates=candidates, checks=checks, auto_compact=auto_compact)
+                     candidates=candidates, checks=checks, auto_compact=auto_compact, watch=watch_enabled)
     digest = hashlib.sha256(str(path).encode()).hexdigest()[:10]
     return path, f'xc-{name}-{digest}', agents
 
@@ -343,6 +346,36 @@ def managed(path, session):
     return True
 
 
+def groups():
+    result = run('tmux', 'list-sessions', '-F', '#{session_name}\t#{@xcontrol_config}', check=False)
+    if result.returncode:
+        detail = result.stderr.strip()
+        if any(text in detail.lower() for text in ('no server running', 'no such file or directory', 'connection refused')):
+            return []
+        raise ValueError('Cannot list tmux groups: ' + detail)
+    return [line.split('\t', 1) for line in result.stdout.splitlines()
+            if '\t' in line and line.split('\t', 1)[1]]
+
+
+def stop_all():
+    with lock('launcher.lock', blocking=True):
+        owned = groups()
+        if not owned:
+            print('No xcontrol groups running.')
+        failures = False
+        for session, config in owned:
+            # Recheck the ownership marker before stopping; ignore other tmux sessions.
+            if not managed(Path(config), session):
+                continue
+            result = run('tmux', 'kill-session', '-t', '=' + session, check=False)
+            if result.returncode:
+                print(f'Could not close {session}.', file=sys.stderr)
+                failures = True
+            else:
+                print(f'Closed {session}.')
+    return 1 if failures else 0
+
+
 def peers(session):
     raw = tmux('list-panes', '-t', session + ':agents', '-F', '#{@xcontrol_id}\t#{pane_id}\t#{pane_current_command}\t#{pane_dead}')
     return [line.split('\t') for line in raw.splitlines()]
@@ -472,6 +505,17 @@ def pane(filename, ident, selected=None, handoff=None):
         agent['agent'] = selected
         if selected not in BUILTINS:
             agent['resume'] = 'new'
+    if agent.get('watch') and agent['agent'] in HANDOFF_ENGINES:
+        agent['prompt'] = (
+            'xcontrol policy: watch=true. A separate local quota watcher may hand this role to another CLI '
+            'after a stable, independently confirmed usage-limit failure. Do not poll providers or launch '
+            'replacement agents yourself. At natural milestones, keep a brief durable checkpoint in an '
+            'appropriate project note: current task, completed work, next steps, validation and user approval '
+            'boundaries. Use existing notes where suitable, avoid secrets, and do not send progress chatter. '
+            'The replacement receives recent terminal history and Git state, not your full native conversation; '
+            'it must verify files and checkpoints before continuing authorized unfinished work. '
+            'This is a maintenance policy, not a new task or permission to deploy, publish or expand scope.'
+            + ('\n\n' + agent['prompt'] if agent.get('prompt') else ''))
     if agent.get('auto_compact'):
         agent['prompt'] = compact_policy(agent) + ('\n\n' + agent['prompt'] if agent.get('prompt') else '')
     key = hashlib.sha256((agent['agent'] + ':' + agent['folder']).encode()).hexdigest()
@@ -480,6 +524,7 @@ def pane(filename, ident, selected=None, handoff=None):
         os.environ['XCONTROL_CONFIG'] = str(path)
         os.environ['XCONTROL_AGENT'] = ident
         os.environ['XCONTROL_SESSION'] = session
+        os.environ['XCONTROL_WATCH'] = '1' if agent.get('watch') else '0'
         os.environ['XCONTROL_AUTO_COMPACT'] = '1' if agent.get('auto_compact') else '0'
         print(f"xcontrol · {ident} · {agent['agent']}: {agent.get('role', '')}", flush=True)
         print(f"Peers: xc status {shlex.quote(str(path))}", flush=True)
@@ -590,7 +635,8 @@ def quota_candidate(history, previous, now):
 def watch_worker(filename, token, guard_fd=None):
     path, session, agents = load(filename)
     digest = hashlib.sha256(str(path).encode()).hexdigest()
-    guard = os.fdopen(int(guard_fd), 'a') if guard_fd is not None else lock('watch-' + digest + '.lock')
+    guard = (lock('watch-' + digest + '.lock', blocking=True) if guard_fd == 'wait' else
+             os.fdopen(int(guard_fd), 'a') if guard_fd is not None else lock('watch-' + digest + '.lock'))
     with guard:
         observations, cooldown, tried = {}, {}, {}
         def enabled():
@@ -658,8 +704,12 @@ def watch(path, session, stop=False, detached=False):
         try:
             guard = lock('watch-' + digest + '.lock')
         except ValueError:
-            print('Automatic switching is already running (or stopping).')
-            return 0
+            if tmux('show-options', '-qv', '-t', session, '@xcontrol_watch'):
+                print('Automatic switching is already running (or stopping).')
+                return 0
+            # A stopped watcher may still be finishing a check. Its token is
+            # revoked; the replacement waits on the OS lock without polling.
+            guard = None
         token = uuid.uuid4().hex
         tmux('set-option', '-t', session, '@xcontrol_watch', token)
         if detached:
@@ -667,19 +717,23 @@ def watch(path, session, stop=False, detached=False):
             fd = os.open(logfile, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
             os.fchmod(fd, 0o600)
             with os.fdopen(fd, 'a') as stream:
-                subprocess.Popen([sys.executable, str(SCRIPT), '--watch-worker', str(path), token, str(guard.fileno())],
-                                 pass_fds=(guard.fileno(),), stdin=subprocess.DEVNULL, stdout=stream, stderr=stream,
+                subprocess.Popen([sys.executable, str(SCRIPT), '--watch-worker', str(path), token, str(guard.fileno()) if guard else 'wait'],
+                                 pass_fds=(guard.fileno(),) if guard else (), stdin=subprocess.DEVNULL, stdout=stream, stderr=stream,
                                  start_new_session=True)
-            guard.close()
+            if guard:
+                guard.close()
             print(f'Automatic switching enabled. Log: {logfile}')
             return 0
     print('Watching for confirmed usage limits. Ctrl+C stops watching; agents keep running.', flush=True)
     try:
-        return watch_worker(str(path), token, os.dup(guard.fileno()))
+        return watch_worker(str(path), token, os.dup(guard.fileno()) if guard else 'wait')
     except KeyboardInterrupt:
+        if managed(path, session) and tmux('show-options', '-qv', '-t', session, '@xcontrol_watch') == token:
+            tmux('set-option', '-t', session, '@xcontrol_watch', '')
         return 0
     finally:
-        guard.close()
+        if guard:
+            guard.close()
 
 
 def directory_config(directory, action):
@@ -795,7 +849,8 @@ def parse_cli(arguments):
         'compact': 'Request native context compaction at an idle prompt.',
         'switch': 'Hand off one or all panes to another CLI.',
         'watch': 'Watch for confirmed quota limits; opt-in.',
-        'stop': 'Close the project group, retaining native history.',
+        'stop': 'Close one project group or all xcontrol groups.',
+        'ps': 'List running xcontrol groups in this tmux server.',
         'logo': 'Show the terminal mascot.',
     }
     examples = {
@@ -811,10 +866,12 @@ def parse_cli(arguments):
             epilog='Example:\n  ' + examples[action] if action in examples else None,
             formatter_class=argparse.RawDescriptionHelpFormatter)
         sub.set_defaults(command_parser=sub)
-        if action not in ('list', 'logo'):
+        if action not in ('list', 'logo', 'ps'):
             config_only = action in ('check', 'availability')
-            sub.add_argument('project', metavar='CONFIG' if config_only else 'PROJECT',
+            sub.add_argument('project', **({'nargs': '?'} if action == 'stop' else {}), metavar='CONFIG' if config_only else 'PROJECT',
                              help='.agents file' if config_only else '.agents file or project directory')
+        if action == 'stop':
+            sub.add_argument('--all', action='store_true', help='close all xcontrol groups in this tmux server')
         if action in ('send', 'compact', 'switch'):
             kwargs = {'nargs': '?'} if action == 'switch' else {}
             sub.add_argument('agent_id', metavar='AGENT', help='role ID from xc status', **kwargs)
@@ -866,6 +923,24 @@ def main():
     if args is None:
         return 0
     action = args.action
+    if action == 'ps' or (action == 'stop' and args.all):
+        if action == 'stop' and args.project is not None:
+            parser.error('Use xc stop PROJECT or xc stop --all, not both.')
+        if not shutil.which('tmux'):
+            raise ValueError('Missing dependency: tmux.')
+        if action == 'stop':
+            return stop_all()
+        owned = groups()
+        if not owned:
+            print('No xcontrol groups running.')
+        else:
+            width = max(len('Group'), max(len(row[0]) for row in owned))
+            print(f'{"Group":<{width}}  Config')
+            for session, config in owned:
+                print(f'{session:<{width}}  {config}')
+        return 0
+    if action == 'stop' and args.project is None:
+        parser.error('Use xc stop PROJECT or xc stop --all.')
     if action == 'logo':
         print(terminal_logo(sys.stdout) + '\n  xcontrol')
         return 0
@@ -954,6 +1029,7 @@ def main():
             tmux('kill-session', '-t', '=' + session)
             print('Closed project group; saved CLI conversations remain.')
         return 0
+    created = False
     with lock('launcher.lock', blocking=True):
         if not managed(path, session):
             agents = resolve_agents(agents, path)
@@ -979,6 +1055,7 @@ def main():
                     tmux('select-pane', '-t', target, '-T', agent['id'] + ' · ' + agent['agent'])
                     tmux('select-layout', '-t', session + ':agents', 'tiled')
                 tmux('select-pane', '-t', peers(session)[0][1])
+                created = True
             except BaseException:
                 # Only remove a session whose ownership marker we set.
                 if managed(path, session):
@@ -987,6 +1064,8 @@ def main():
             finally:
                 for guard in guards:
                     guard.close()
+    if created and agents[0].get('watch'):
+        watch(path, session, detached=True)
     if args.detach:
         print(session)
         return 0

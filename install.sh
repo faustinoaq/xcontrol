@@ -15,4 +15,4 @@ fi
 ln -sfn "$root/bin/xc" "$bin/xc"
 ln -sfn "$root/bin/xc" "$bin/xcontrol"
 ln -sfn "$root/skills/xcontrol" "$skill"
-echo "Installed xc, xcontrol, and the Codex skill. Add $bin to PATH if needed."
+echo "Installed xc, xcontrol, and the skill (linked for Codex). Add $bin to PATH if needed."

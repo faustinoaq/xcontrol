@@ -26,13 +26,14 @@ xcontrol keeps setup configs, handoff snapshots, message hashes, watcher logs, a
 
 ## Uninstall
 
-Stop each running group from another terminal first:
+List and stop your xcontrol groups from another terminal first:
 
 ```sh
-xc stop /path/to/myapp.agents
+xc ps
+xc stop --all
 ```
 
-For a setup group opened with `xc .`, use `xc stop /path/to/project`.
+This leaves unrelated tmux sessions running. To stop just one group, use `xc stop /path/to/myapp.agents`, or `xc stop /path/to/project` for a setup group.
 
 Remove the links created by `install.sh`:
 
@@ -107,6 +108,7 @@ xc myapp.agents                  # start or reattach
 xc logo                         # show the mascot
 xc list                         # installed supported CLIs
 xc list --check                 # test model access
+xc ps                           # list all xcontrol groups
 xc status myapp.agents           # see who's running
 xc send myapp.agents server "Please review the API changes"
 xc stop myapp.agents             # close the group
@@ -166,9 +168,17 @@ xc watch myapp.agents --detach   # enable quota watching in the background
 xc watch myapp.agents --stop     # disable it; agents keep running
 ```
 
-Start the watcher yourself after opening the group; `agent = "auto"` does not start it. It runs as a local background Python process, not another AI agent.
+To start watching automatically with each new group, add this at the top of your `.agents` file:
 
-The watcher uses no model while waiting. A quota notice must stay unchanged for a minute, then a small model call must also confirm the limit. It passes context to the next available CLI and avoids looping through exhausted providers. Detection depends on each CLI's error messages, so manual switching remains available. It stops with the project group; enable it again after reopening.
+```toml
+watch = true
+```
+
+Off by default. `agent = "auto"` alone only chooses the starting provider. The watcher runs as a local background Python process, not another AI agent. Reattaching does not start a second watcher or undo `xc watch PROJECT --stop`; closing and reopening starts it again when `watch = true`.
+
+With `watch = true`, supported agents also receive startup instructions to preserve brief task checkpoints at natural milestones. A replacement gets its role, recent terminal history and Git state; it verifies project notes and unfinished work before continuing. Full native conversation history is not transferred.
+
+The watcher uses no model while waiting. A quota notice must stay unchanged for a minute, then a small model call must also confirm the limit. It passes context to the next available CLI and avoids looping through exhausted providers. Detection depends on each CLI's error messages, so manual switching remains available. It stops with the project group. Without `watch = true`, start it explicitly again after reopening.
 
 ## Compact a conversation
 
@@ -188,7 +198,7 @@ Off by default. At startup, agents receive instructions to use context pressure 
 
 ## Ask your agent to set it up
 
-The installer includes a [skill](skills/xcontrol/SKILL.md). Try:
+The included [skill](skills/xcontrol/SKILL.md) is plain `SKILL.md`, not Codex-specific. The installer links it into Codex's skill directory by default; for another compatible CLI, copy or link `skills/xcontrol` into that tool's documented skill directory. Try:
 
 > Use xcontrol to create myapp.agents with myapp-android using Codex, myapp-ios using Copilot, and myapp-server using Claude.
 

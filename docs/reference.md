@@ -107,11 +107,11 @@ xc watch myapp.agents --detach    # background
 xc watch myapp.agents --stop      # disable; leave agents running
 ```
 
-Start this explicitly after opening the project group. Setting `agent = "auto"` only selects a provider at launch; it never starts quota watching. This is a local Python supervisor, not an extra model agent. It checks live pane screens about every 30 seconds without model calls. It requires a recognizable quota notice in the last 12 screen lines and an unchanged screen for at least 60 seconds. It then probes that same provider separately. Only an explicit quota failure permits a handoff; authentication errors, timeouts, generic HTTP 429 errors, context limits and unknown failures do not. If the screen changes during confirmation, it does not switch. This is best-effort terminal detection, not a guaranteed provider event API; unrecognized notices need manual switching. A stable screen cannot prove there are no background tasks. Enable only when automatic interruption on a confirmed quota failure is appropriate.
+Start this explicitly after opening the project group, or set top-level `watch = true` in `.agents` to start a detached watcher whenever a new group is created. The default is false; only booleans are accepted. `agent = "auto"` alone only selects a provider at launch. Reattaching starts no extra watcher, and a manual `xc watch PROJECT --stop` remains effective until the next new group. A replacement watcher waits for a stopped worker to release its lock if the old check is still finishing. This is a local Python supervisor, not an extra model agent. It checks live pane screens about every 30 seconds without model calls. It requires a recognizable quota notice in the last 12 screen lines and an unchanged screen for at least 60 seconds. It then probes that same provider separately. Only an explicit quota failure permits a handoff; authentication errors, timeouts, generic HTTP 429 errors, context limits and unknown failures do not. If the screen changes during confirmation, it does not switch. This is best-effort terminal detection, not a guaranteed provider event API; unrecognized notices need manual switching. A stable screen cannot prove there are no background tasks. Enable only when automatic interruption on a confirmed quota failure is appropriate.
 
 The next provider comes from that role's candidates, using normal access probes and the existing handoff snapshot. A watched role never returns to a provider already confirmed exhausted during that watch run. Once alternatives run out, it stays in place. Failed confirmation or replacement is retried no more than once every five minutes per pane/provider. Stopping and restarting the watcher clears its exhausted-provider memory. The normal model checks still use the CLI's own model and billing settings, so watching does not guarantee free usage.
 
-One watcher runs per config, protected by an OS lock. Background logs are private files in `$XDG_STATE_HOME/xcontrol` (default `~/.local/state/xcontrol`); they contain check results and handoff paths, not captured terminal content. No external service is installed. The watcher exits when disabled or when its tmux group ends. Disabling prevents further handoffs after an in-flight check finishes, but cannot undo a handoff already completed. Enabling does not edit the configuration and is not restored when reopening the group. Closed panes follow tmux settings and are not recreated by the watcher.
+One watcher runs per config, protected by an OS lock. Background logs are private files in `$XDG_STATE_HOME/xcontrol` (default `~/.local/state/xcontrol`); they contain check results and handoff paths, not captured terminal content. No external service is installed. The watcher exits when disabled or when its tmux group ends. Disabling prevents further handoffs after an in-flight check finishes, but cannot undo a handoff already completed. Manual enabling does not edit the configuration. Reopening only restores watching when the configuration explicitly sets `watch = true`. Closed panes follow tmux settings and are not recreated by the watcher. With `watch = true`, supported agents receive a startup policy describing the watcher and encouraging brief durable checkpoints at natural milestones; `XCONTROL_WATCH=1` reflects that startup intent, not live worker health. Manual watcher activation does not inject instructions into existing conversations. Handoffs preserve role/recent terminal/Git context and previous handoff links, not the complete native history, so replacements must verify checkpoint notes and current files.
 
 ## Optional context compaction
 
@@ -179,6 +179,8 @@ Help is scoped to each command: `xc list --help` shows only list options. `xc --
 ```sh
 xc logo                          # show the SVG-derived terminal mascot
 xc compact myapp.agents server   # request native compaction at an idle prompt
+xc ps                            # list groups in the current tmux server
+xc stop --all                    # close all xcontrol groups in that server
 xc list                          # installed supported CLIs, no model calls
 xc list --check                  # test each installed supported CLI
 xc switch myapp.agents --auto     # hand off all roles
@@ -202,6 +204,10 @@ Mouse support is enabled for new xcontrol sessions, so you can click panes, resi
 All panes follow your tmux `remain-on-exit` setting. With `set -g remain-on-exit off`, panes close when their agent exits. Saved conversations remain available through the CLI's native session history.
 
 Locks prevent this launcher from opening the same CLI/folder pair twice; separate worktrees are recommended for concurrent editing. Sessions started outside xcontrol are not detected. Git synchronization, task scheduling, recovery of crashed agents, and deployment are left to you.
+
+## List or stop all groups
+
+`xc ps` lists xcontrol groups and their config paths on the current tmux server, including groups whose config file has been moved or deleted. It does not require a project argument or inspect provider conversation content. `xc stop --all` closes all groups carrying xcontrol's ownership marker, rechecking ownership before each close. It leaves unrelated tmux sessions running. Do this from outside the groups being stopped, especially before uninstalling. Other tmux servers/sockets are outside its scope. `xc stop PROJECT` and `xc PROJECT -k` still stop one group; `PROJECT` and `--all` cannot be combined.
 
 ## Communication
 
